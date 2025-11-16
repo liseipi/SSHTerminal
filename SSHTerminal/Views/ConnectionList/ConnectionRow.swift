@@ -3,8 +3,12 @@ import SwiftUI
 struct ConnectionRow: View {
     let connection: SSHConnection
     let isActive: Bool
+    let isConnecting: Bool
     let onConnect: () -> Void
+    let onEdit: () -> Void
     let onDelete: () -> Void
+    
+    @State private var isHovering = false
     
     var body: some View {
         HStack {
@@ -27,15 +31,50 @@ struct ConnectionRow: View {
             
             Spacer()
             
-            Button(action: onDelete) {
-                Image(systemName: "trash")
-                    .foregroundColor(.red)
+            // 操作按钮（悬停时显示）
+            if isHovering || isActive {
+                HStack(spacing: 8) {
+                    // 编辑按钮
+                    Button(action: onEdit) {
+                        Image(systemName: "pencil.circle.fill")
+                            .foregroundColor(.blue)
+                    }
+                    .buttonStyle(.plain)
+                    .help("编辑连接")
+                    
+                    // 连接/断开按钮
+                    if isConnecting {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else if isActive {
+                        Button(action: onConnect) {
+                            Image(systemName: "stop.circle.fill")
+                                .foregroundColor(.orange)
+                        }
+                        .buttonStyle(.plain)
+                        .help("断开连接")
+                    }
+                    
+                    // 删除按钮
+                    Button(action: onDelete) {
+                        Image(systemName: "trash.circle.fill")
+                            .foregroundColor(.red)
+                    }
+                    .buttonStyle(.plain)
+                    .help("删除连接")
+                }
             }
-            .buttonStyle(.plain)
         }
         .padding()
         .background(isActive ? Color.blue.opacity(0.1) : Color.clear)
         .contentShape(Rectangle())
-        .onTapGesture(perform: onConnect)
+        .onTapGesture {
+            if !isConnecting {
+                onConnect()
+            }
+        }
+        .onHover { hovering in
+            isHovering = hovering
+        }
     }
 }

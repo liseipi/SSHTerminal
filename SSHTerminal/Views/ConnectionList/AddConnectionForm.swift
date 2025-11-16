@@ -2,48 +2,63 @@ import SwiftUI
 
 struct AddConnectionForm: View {
     @ObservedObject var viewModel: SSHTerminalViewModel
-    @State private var newConnection = SSHConnection()
+    @State private var connection: SSHConnection
+    
+    var isEditing: Bool {
+        viewModel.editingConnection != nil
+    }
+    
+    init(viewModel: SSHTerminalViewModel) {
+        self.viewModel = viewModel
+        self._connection = State(initialValue: viewModel.editingConnection ?? SSHConnection())
+    }
     
     var body: some View {
         VStack(spacing: 8) {
-            TextField("连接名称", text: $newConnection.name)
+            Text(isEditing ? "编辑连接" : "添加新连接")
+                .font(.headline)
+            
+            TextField("连接名称", text: $connection.name)
                 .textFieldStyle(.roundedBorder)
             
-            TextField("主机地址", text: $newConnection.host)
+            TextField("主机地址", text: $connection.host)
                 .textFieldStyle(.roundedBorder)
             
-            TextField("端口", value: $newConnection.port, format: .number)
+            TextField("端口", value: $connection.port, format: .number)
                 .textFieldStyle(.roundedBorder)
             
-            TextField("用户名", text: $newConnection.username)
+            TextField("用户名", text: $connection.username)
                 .textFieldStyle(.roundedBorder)
             
-            Picker("认证方式", selection: $newConnection.authType) {
+            Picker("认证方式", selection: $connection.authType) {
                 ForEach(SSHConnection.AuthType.allCases, id: \.self) { type in
                     Text(type.rawValue).tag(type)
                 }
             }
             .pickerStyle(.segmented)
             
-            if newConnection.authType == .password {
-                SecureField("密码", text: $newConnection.password)
+            if connection.authType == .password {
+                SecureField("密码", text: $connection.password)
                     .textFieldStyle(.roundedBorder)
             } else {
-                TextField("密钥路径", text: $newConnection.keyPath)
+                TextField("密钥路径 (如: ~/.ssh/id_rsa)", text: $connection.keyPath)
                     .textFieldStyle(.roundedBorder)
             }
             
             HStack {
-                Button("添加") {
-                    viewModel.addConnection(newConnection)
-                    newConnection = SSHConnection()
+                Button(isEditing ? "保存" : "添加") {
+                    if isEditing {
+                        viewModel.updateConnection(connection)
+                    } else {
+                        viewModel.addConnection(connection)
+                    }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(newConnection.name.isEmpty || newConnection.host.isEmpty || newConnection.username.isEmpty)
+                .disabled(connection.name.isEmpty || connection.host.isEmpty || connection.username.isEmpty)
                 
                 Button("取消") {
                     viewModel.showAddForm = false
-                    newConnection = SSHConnection()
+                    viewModel.editingConnection = nil
                 }
             }
         }

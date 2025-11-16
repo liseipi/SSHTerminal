@@ -7,29 +7,60 @@ class SFTPService {
         self.connection = connection
     }
     
+    // MARK: - 目录浏览
+    
     func listDirectory(path: String, completion: @escaping (Result<[FileItem], Error>) -> Void) {
-        let sftpCommand = buildListCommand(path: path)
-        executeCommand(sftpCommand) { result in
-            switch result {
-            case .success(let output):
-                let files = self.parseListOutput(output)
-                completion(.success(files))
-            case .failure(let error):
-                completion(.failure(error))
+        let sftpCommand = buildSFTPCommand(path: path)
+        
+        let process = Process()
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", sftpCommand]
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            
+            if process.terminationStatus == 0 {
+                if let output = String(data: outputData, encoding: .utf8) {
+                    let files = parseSFTPOutput(output)
+                    completion(.success(files))
+                } else {
+                    completion(.failure(SSHError.invalidOutput))
+                }
+            } else {
+                let errorMessage = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+                completion(.failure(SSHError.commandFailed(errorMessage)))
             }
+        } catch {
+            completion(.failure(error))
         }
     }
     
-    private func buildListCommand(path: String) -> String {
-        let expandedPath = NSString(string: path).expandingTildeInPath
+    private func buildSFTPCommand(path: String) -> String {
+        let authOption: String
         if connection.authType == .password {
+            // 使用 expect 处理密码
             return """
-            /usr/bin/expect -c '
-            set timeout 10
-            spawn sftp -o StrictHostKeyChecking=no -P \(connection.port) \(connection.username)@\(connection.host)
-            expect "password:" { send "\(connection.password)\\r" }
+            expect -c '
+            spawn sftp -P \(connection.port) \(connection.username)@\(connection.host)
+            expect {
+                "password:" {
+                    send "\(connection.password)\\r"
+                }
+                "Password:" {
+                    send "\(connection.password)\\r"
+                }
+            }
             expect "sftp>"
-            send "cd \(expandedPath)\\r"
+            send "cd \(path)\\r"
             expect "sftp>"
             send "ls -la\\r"
             expect "sftp>"
@@ -38,70 +69,124 @@ class SFTPService {
             '
             """
         } else {
-            let keyPath = NSString(string: connection.keyPath).expandingTildeInPath
-            return "echo -e 'cd \(expandedPath)\\nls -la\\nbye' | sftp -o StrictHostKeyChecking=no -i \(keyPath) -P \(connection.port) \(connection.username)@\(connection.host)"
+            authOption = "-i \(connection.keyPath)"
+            return """
+            echo -e "cd \(path)\\nls -la\\nbye" | sftp \(authOption) -P \(connection.port) \(connection.username)@\(connection.host)
+            """
         }
     }
     
-    private func parseListOutput(_ output: String) -> [FileItem] {
+    private func parseSFTPOutput(_ output: String) -> [FileItem] {
         var files: [FileItem] = []
         let lines = output.components(separatedBy: .newlines)
         
         for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty else { continue }
-            
-            let components = trimmed.split(separator: " ", omittingEmptySubsequences: true)
+            // 解析 ls -la 输出格式
+            // 例如: drwxr-xr-x    5 user  group      160 Jan 15 10:30 documents
+            let components = line.split(separator: " ", omittingEmptySubsequences: true)
             guard components.count >= 9 else { continue }
             
             let permissions = String(components[0])
             let name = components[8...].joined(separator: " ")
             
+            // 跳过 . 和 ..
             guard name != "." && name != ".." else { continue }
-            guard !name.contains("sftp>") else { continue }
             
             let isDirectory = permissions.hasPrefix("d")
-            let size = isDirectory ? nil : String(components[4])
+            let size = isDirectory ? nil : formatFileSize(String(components[4]))
             
-            files.append(FileItem(
+            let fileItem = FileItem(
                 name: name,
                 type: isDirectory ? .directory : .file,
                 size: size,
                 children: isDirectory ? [] : nil
-            ))
+            )
+            
+            files.append(fileItem)
         }
         
         return files
     }
     
-    private func executeCommand(_ command: String, completion: @escaping (Result<String, Error>) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            let outputPipe = Pipe()
-            let errorPipe = Pipe()
+    private func formatFileSize(_ bytes: String) -> String {
+        guard let byteCount = Int64(bytes) else { return bytes }
+        
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: byteCount)
+    }
+    
+    // MARK: - 文件操作
+    
+    func downloadFile(remotePath: String, localPath: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        let command: String
+        if connection.authType == .password {
+            command = """
+            expect -c '
+            spawn sftp -P \(connection.port) \(connection.username)@\(connection.host)
+            expect "password:"
+            send "\(connection.password)\\r"
+            expect "sftp>"
+            send "get \(remotePath) \(localPath)\\r"
+            expect "sftp>"
+            send "bye\\r"
+            expect eof
+            '
+            """
+        } else {
+            command = """
+            echo "get \(remotePath) \(localPath)" | sftp -i \(connection.keyPath) -P \(connection.port) \(connection.username)@\(connection.host)
+            """
+        }
+        
+        executeShellCommand(command, completion: completion)
+    }
+    
+    func uploadFile(localPath: String, remotePath: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        let command: String
+        if connection.authType == .password {
+            command = """
+            expect -c '
+            spawn sftp -P \(connection.port) \(connection.username)@\(connection.host)
+            expect "password:"
+            send "\(connection.password)\\r"
+            expect "sftp>"
+            send "put \(localPath) \(remotePath)\\r"
+            expect "sftp>"
+            send "bye\\r"
+            expect eof
+            '
+            """
+        } else {
+            command = """
+            echo "put \(localPath) \(remotePath)" | sftp -i \(connection.keyPath) -P \(connection.port) \(connection.username)@\(connection.host)
+            """
+        }
+        
+        executeShellCommand(command, completion: completion)
+    }
+    
+    private func executeShellCommand(_ command: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        let process = Process()
+        let errorPipe = Pipe()
+        
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", command]
+        process.standardError = errorPipe
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
             
-            process.executableURL = URL(fileURLWithPath: "/bin/bash")
-            process.arguments = ["-c", command]
-            process.standardOutput = outputPipe
-            process.standardError = errorPipe
-            
-            do {
-                try process.run()
-                process.waitUntilExit()
-                
-                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: outputData, encoding: .utf8) ?? ""
-                
-                if process.terminationStatus == 0 {
-                    completion(.success(output))
-                } else {
-                    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                    let error = String(data: errorData, encoding: .utf8) ?? "Unknown error"
-                    completion(.failure(SSHError.commandFailed(error)))
-                }
-            } catch {
-                completion(.failure(error))
+            if process.terminationStatus == 0 {
+                completion(.success(()))
+            } else {
+                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                let errorMessage = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+                completion(.failure(SSHError.commandFailed(errorMessage)))
             }
+        } catch {
+            completion(.failure(error))
         }
     }
 }
