@@ -1,4 +1,5 @@
 项目结构：
+```
 SSHTerminal/
 ├── SSHTerminal.xcodeproj
 │   ├── project.pbxproj
@@ -59,5 +60,6 @@ SSHTerminal/
 │   └── Info.plist
 │
 └── SSHTerminalUITests/
-    ├── SSHTerminalUITests.swift
-    └── Info.plist
+├── SSHTerminalUITests.swift
+└── Info.plist
+```
