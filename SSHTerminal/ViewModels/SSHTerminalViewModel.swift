@@ -29,10 +29,19 @@ class SSHTerminalViewModel: ObservableObject {
     // MARK: - 连接管理
     
     func connect(to connection: SSHConnection) {
-        guard !isConnecting else { return }
+        print("🔵 [ViewModel] connect() called")
+        print("🔵 [ViewModel] Connection: \(connection.name)")
+        print("🔵 [ViewModel] isConnecting: \(isConnecting)")
+        
+        guard !isConnecting else {
+            print("⚠️ [ViewModel] Already connecting, ignoring request")
+            return
+        }
         
         isConnecting = true
         connectionStatus = "正在连接..."
+        
+        print("🔵 [ViewModel] Adding system message to terminal")
         
         // 添加系统消息
         terminalLines.append(TerminalLine(
@@ -40,13 +49,18 @@ class SSHTerminalViewModel: ObservableObject {
             type: .system
         ))
         
+        print("🔵 [ViewModel] Creating SSHService")
+        
         // 创建 SSH 服务
         let service = SSHService()
         sshService = service
         
+        print("🔵 [ViewModel] Setting up service observers")
+        
         // 监听连接状态
         service.$isConnected
             .sink { [weak self] isConnected in
+                print("🔵 [ViewModel] isConnected changed to: \(isConnected)")
                 if isConnected {
                     self?.handleConnectionSuccess(connection)
                 }
@@ -55,16 +69,21 @@ class SSHTerminalViewModel: ObservableObject {
         
         // 监听输出
         service.onOutputReceived = { [weak self] output, type in
+            print("🔵 [ViewModel] Output received: \(output)")
             self?.handleTerminalOutput(output, type: type)
         }
         
+        print("🟢 [ViewModel] Calling service.connect()")
+        
         // 发起连接
         service.connect(to: connection) { [weak self] result in
+            print("🔵 [ViewModel] Connection result received")
             DispatchQueue.main.async {
                 self?.isConnecting = false
                 
                 switch result {
                 case .success():
+                    print("🟢 [ViewModel] Connection successful!")
                     self?.activeConnection = connection
                     self?.connectionStatus = "已连接"
                     self?.terminalLines.append(TerminalLine(
@@ -79,6 +98,7 @@ class SSHTerminalViewModel: ObservableObject {
                     self?.getCurrentDirectory()
                     
                 case .failure(let error):
+                    print("🔴 [ViewModel] Connection failed: \(error)")
                     self?.connectionStatus = "连接失败"
                     self?.terminalLines.append(TerminalLine(
                         text: "✗ 连接失败: \(error.localizedDescription)",
@@ -87,6 +107,8 @@ class SSHTerminalViewModel: ObservableObject {
                 }
             }
         }
+        
+        print("🟢 [ViewModel] connect() method completed")
     }
     
     private func handleConnectionSuccess(_ connection: SSHConnection) {

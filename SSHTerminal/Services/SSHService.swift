@@ -20,71 +20,168 @@ class SSHService: NSObject, ObservableObject {
     // MARK: - 连接管理
     
     func connect(to connection: SSHConnection, completion: @escaping (Result<Void, Error>) -> Void) {
+        print("🔵 [SSHService] Starting connection process...")
+        print("🔵 [SSHService] Host: \(connection.host):\(connection.port)")
+        print("🔵 [SSHService] User: \(connection.username)")
+        print("🔵 [SSHService] Auth: \(connection.authType.rawValue)")
+        
         guard !isConnected else {
+            print("🔴 [SSHService] Already connected!")
             completion(.failure(SSHError.alreadyConnected))
             return
         }
         
         self.connection = connection
         
-        // 根据认证类型选择不同的连接方式
         if connection.authType == .password {
+            print("🔵 [SSHService] Using password authentication...")
             connectWithPassword(connection, completion: completion)
         } else {
+            print("🔵 [SSHService] Using key authentication...")
             connectWithKey(connection, completion: completion)
         }
     }
     
     private func connectWithPassword(_ connection: SSHConnection, completion: @escaping (Result<Void, Error>) -> Void) {
-        // 使用 sshpass（如果可用）或者通过 expect 脚本
-        // 注意：macOS 默认不包含 sshpass，需要使用 expect
         connectWithExpect(connection, completion: completion)
     }
     
     private func connectWithExpect(_ connection: SSHConnection, completion: @escaping (Result<Void, Error>) -> Void) {
-        // 创建 expect 脚本处理密码输入
-        let expectScript = """
-        #!/usr/bin/expect -f
+        print("🟡 [connectWithExpect] Using inline expect script...")
+        
+        let escapedPassword = connection.password
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "$", with: "\\$")
+            .replacingOccurrences(of: "`", with: "\\`")
+        
+        let expectCommand = """
+        /usr/bin/expect << 'EXPECTEOF'
         set timeout 30
-        spawn ssh -p \(connection.port) \(connection.username)@\(connection.host)
+        log_user 1
+        
+        puts "=== Starting SSH connection to \(connection.host) ==="
+        
+        spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PubkeyAuthentication=no -o PreferredAuthentications=password -o NumberOfPasswordPrompts=3 -v -p \(connection.port) \(connection.username)@\(connection.host)
+        
+        puts "=== Waiting for password prompt ==="
+        
         expect {
-            "Are you sure you want to continue connecting" {
-                send "yes\\r"
-                exp_continue
+            -re "password:" {
+                puts "=== PASSWORD PROMPT DETECTED ==="
+                sleep 0.1
+                send "\(escapedPassword)\\r"
+                puts "=== PASSWORD SENT ==="
             }
-            "password:" {
-                send "\(connection.password)\\r"
+            -re "Password:" {
+                puts "=== PASSWORD PROMPT DETECTED (caps) ==="
+                sleep 0.1
+                send "\(escapedPassword)\\r"
+                puts "=== PASSWORD SENT ==="
             }
-            "Password:" {
-                send "\(connection.password)\\r"
+            timeout {
+                puts "=== ERROR: No password prompt received ==="
+                exit 1
+            }
+            eof {
+                puts "=== ERROR: Connection closed before password prompt ==="
+                exit 1
             }
         }
+        
+        puts "=== Waiting for shell prompt ==="
+        
+        expect {
+            -re "\\$|#" {
+                puts "=== SUCCESS: Got shell prompt ==="
+                send "echo SSH_CONNECTION_READY\\r"
+            }
+            -re "(?i)permission denied" {
+                puts "=== ERROR: Permission denied - wrong password ==="
+                exit 1
+            }
+            -re "(?i)authentication.*failed" {
+                puts "=== ERROR: Authentication failed ==="
+                exit 1
+            }
+            timeout {
+                puts "=== ERROR: Timeout waiting for shell ==="
+                exit 1
+            }
+            eof {
+                puts "=== ERROR: Connection closed after password ==="
+                exit 1
+            }
+        }
+        
+        expect "SSH_CONNECTION_READY"
+        puts "=== Connection established, entering interactive mode ==="
         interact
+        EXPECTEOF
         """
         
-        // 创建临时 expect 脚本文件
-        let tempDir = FileManager.default.temporaryDirectory
-        let scriptPath = tempDir.appendingPathComponent("ssh_expect_\(UUID().uuidString).exp")
-        
-        do {
-            try expectScript.write(to: scriptPath, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath.path)
-            
-            startSSHProcess(scriptPath: scriptPath.path, connection: connection, completion: completion)
-        } catch {
-            completion(.failure(error))
-        }
+        print("🟢 [connectWithExpect] Command prepared")
+        startSSHProcess(command: expectCommand, scriptPath: nil, connection: connection, completion: completion)
     }
     
     private func connectWithKey(_ connection: SSHConnection, completion: @escaping (Result<Void, Error>) -> Void) {
-        let sshCommand = """
-        ssh -i \(connection.keyPath) -p \(connection.port) \(connection.username)@\(connection.host)
+        print("🟡 [connectWithKey] Using inline expect script for key auth...")
+        
+        let expandedKeyPath = NSString(string: connection.keyPath).expandingTildeInPath
+        
+        guard FileManager.default.fileExists(atPath: expandedKeyPath) else {
+            print("🔴 [connectWithKey] Key file not found: \(expandedKeyPath)")
+            completion(.failure(SSHError.authenticationFailed))
+            return
+        }
+        
+        print("🟢 [connectWithKey] Key file found: \(expandedKeyPath)")
+        
+        let expectCommand = """
+        /usr/bin/expect -c '
+        set timeout 30
+        log_user 1
+        
+        puts "Starting SSH connection with key..."
+        
+        spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "\(expandedKeyPath)" -p \(connection.port) \(connection.username)@\(connection.host)
+        
+        expect {
+            "$ " {
+                puts "SUCCESS: Connected"
+                send "echo SSH_READY\\r"
+            }
+            "# " {
+                puts "SUCCESS: Connected (root)"
+                send "echo SSH_READY\\r"
+            }
+            "Permission denied" {
+                puts "ERROR: Permission denied"
+                exit 1
+            }
+            timeout {
+                puts "ERROR: Timeout"
+                exit 1
+            }
+            eof {
+                puts "ERROR: Connection closed"
+                exit 1
+            }
+        }
+        
+        expect "SSH_READY"
+        puts "Ready for commands"
+        interact
+        '
         """
         
-        startSSHProcess(command: sshCommand, connection: connection, completion: completion)
+        print("🟢 [connectWithKey] Command prepared")
+        startSSHProcess(command: expectCommand, scriptPath: nil, connection: connection, completion: completion)
     }
     
     private func startSSHProcess(command: String? = nil, scriptPath: String? = nil, connection: SSHConnection, completion: @escaping (Result<Void, Error>) -> Void) {
+        print("🟡 [startSSHProcess] Initializing process...")
+        
         sshProcess = Process()
         inputPipe = Pipe()
         outputPipe = Pipe()
@@ -94,85 +191,112 @@ class SSHService: NSObject, ObservableObject {
               let inputPipe = inputPipe,
               let outputPipe = outputPipe,
               let errorPipe = errorPipe else {
+            print("🔴 [startSSHProcess] Failed to create pipes!")
             completion(.failure(SSHError.processCreationFailed))
             return
         }
         
-        if let scriptPath = scriptPath {
-            sshProcess.executableURL = URL(fileURLWithPath: scriptPath)
-        } else {
+        if let command = command {
+            print("🟡 [startSSHProcess] Using bash command")
             sshProcess.executableURL = URL(fileURLWithPath: "/bin/bash")
-            sshProcess.arguments = ["-c", command ?? ""]
+            sshProcess.arguments = ["-c", command]
+        } else if let scriptPath = scriptPath {
+            print("🟡 [startSSHProcess] Using expect script: \(scriptPath)")
+            sshProcess.executableURL = URL(fileURLWithPath: scriptPath)
+            sshProcess.arguments = []
         }
         
         sshProcess.standardInput = inputPipe
         sshProcess.standardOutput = outputPipe
         sshProcess.standardError = errorPipe
         
-        // 配置 PTY（伪终端）
-        configurePTY()
+        var environment = ProcessInfo.processInfo.environment
+        environment["TERM"] = "xterm-256color"
+        environment["LC_ALL"] = "en_US.UTF-8"
+        environment["LANG"] = "en_US.UTF-8"
+        sshProcess.environment = environment
         
-        // 监听输出
+        var connectionCompleted = false
+        
         outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            
             if let output = String(data: data, encoding: .utf8) {
+                print("📤 [SSH Output] \(output)")
                 DispatchQueue.main.async {
+                    if (output.contains("SUCCESS:") || output.contains("SSH_CONNECTION_READY") || output.contains("Connection established")) && !connectionCompleted {
+                        print("🟢 [startSSHProcess] Connection success detected!")
+                        connectionCompleted = true
+                        self?.isConnected = true
+                        completion(.success(()))
+                    }
                     self?.handleOutput(output)
                 }
             }
         }
         
-        // 监听错误输出
         errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            
             if let error = String(data: data, encoding: .utf8) {
-                DispatchQueue.main.async {
-                    self?.handleError(error)
+                if !error.contains("NSSecureCoding") && !error.contains("NSXPCDecoder") {
+                    print("⚠️ [SSH Error] \(error)")
+                    DispatchQueue.main.async {
+                        if (error.contains("Wrong password") || error.contains("Permission denied")) && !connectionCompleted {
+                            print("🔴 [startSSHProcess] Authentication failed!")
+                            connectionCompleted = true
+                            completion(.failure(SSHError.authenticationFailed))
+                        } else if error.contains("ERROR:") && !connectionCompleted {
+                            print("🔴 [startSSHProcess] Connection error detected!")
+                            connectionCompleted = true
+                            completion(.failure(SSHError.connectionFailed))
+                        }
+                        self?.handleError(error)
+                    }
                 }
             }
         }
         
-        // 进程终止处理
         sshProcess.terminationHandler = { [weak self] process in
+            print("🔚 [startSSHProcess] Process terminated with exit code: \(process.terminationStatus)")
             DispatchQueue.main.async {
-                self?.handleTermination(exitCode: process.terminationStatus)
+                if !connectionCompleted {
+                    print("🔴 [startSSHProcess] Process ended before connection completed!")
+                    connectionCompleted = true
+                    completion(.failure(SSHError.connectionFailed))
+                }
+                self?.isConnected = false
+                if let scriptPath = scriptPath {
+                    try? FileManager.default.removeItem(atPath: scriptPath)
+                    print("🧹 [startSSHProcess] Cleaned up script file")
+                }
             }
         }
         
         do {
+            print("🚀 [startSSHProcess] Starting process...")
             try sshProcess.run()
+            print("🟢 [startSSHProcess] Process started successfully, PID: \(sshProcess.processIdentifier)")
             
-            // 等待连接建立
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                if self?.sshProcess?.isRunning == true {
-                    self?.isConnected = true
-                    completion(.success(()))
-                } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20.0) { [weak self] in
+                if !connectionCompleted {
+                    print("⏱️ [startSSHProcess] Connection timeout after 20 seconds")
+                    connectionCompleted = true
                     completion(.failure(SSHError.connectionFailed))
+                    self?.sshProcess?.terminate()
                 }
             }
         } catch {
+            print("🔴 [startSSHProcess] Failed to start process: \(error)")
             completion(.failure(error))
         }
-    }
-    
-    private func configurePTY() {
-        // 配置伪终端环境变量
-        var environment = ProcessInfo.processInfo.environment
-        environment["TERM"] = "xterm-256color"
-        environment["PS1"] = "\\u@\\h:\\w$ "
-        sshProcess?.environment = environment
     }
     
     // MARK: - 命令执行
     
     func executeCommand(_ command: String, completion: @escaping (String) -> Void) {
         guard isConnected, let inputPipe = inputPipe else {
-            completion("错误：未连接到服务器")
+            completion("错误：未连接")
             return
         }
         
@@ -185,7 +309,6 @@ class SSHService: NSObject, ObservableObject {
         
         isExecutingCommand = true
         let (command, completion) = commandQueue.removeFirst()
-        
         outputBuffer = ""
         
         guard let data = (command + "\n").data(using: .utf8) else {
@@ -196,8 +319,6 @@ class SSHService: NSObject, ObservableObject {
         
         do {
             try inputPipe?.fileHandleForWriting.write(contentsOf: data)
-            
-            // 等待命令执行完成
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 guard let self = self else { return }
                 completion(self.outputBuffer)
@@ -206,11 +327,9 @@ class SSHService: NSObject, ObservableObject {
             }
         } catch {
             isExecutingCommand = false
-            completion("错误：命令发送失败 - \(error.localizedDescription)")
+            completion("错误：\(error.localizedDescription)")
         }
     }
-    
-    // MARK: - 输出处理
     
     private func handleOutput(_ output: String) {
         outputBuffer += output
@@ -222,35 +341,19 @@ class SSHService: NSObject, ObservableObject {
         onOutputReceived?(error, .error)
     }
     
-    private func handleTermination(exitCode: Int32) {
-        isConnected = false
-        if exitCode != 0 {
-            onOutputReceived?("连接已断开（退出码：\(exitCode)）", .error)
-        } else {
-            onOutputReceived?("连接已正常关闭", .system)
-        }
-    }
-    
     // MARK: - 断开连接
     
     func disconnect() {
         guard let sshProcess = sshProcess, sshProcess.isRunning else { return }
-        
-        // 发送退出命令
         if let data = "exit\n".data(using: .utf8) {
             try? inputPipe?.fileHandleForWriting.write(contentsOf: data)
         }
-        
-        // 等待一段时间后强制终止
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             if self?.sshProcess?.isRunning == true {
                 self?.sshProcess?.terminate()
             }
         }
-        
         isConnected = false
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
-        errorPipe?.fileHandleForReading.readabilityHandler = nil
     }
     
     deinit {
