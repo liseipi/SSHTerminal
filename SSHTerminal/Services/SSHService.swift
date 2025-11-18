@@ -295,13 +295,37 @@ class SSHService: NSObject, ObservableObject {
     // MARK: - 命令执行
     
     func executeCommand(_ command: String, completion: @escaping (String) -> Void) {
-        guard isConnected, let inputPipe = inputPipe else {
+        print("🔵 [executeCommand] isConnected: \(isConnected)")
+        print("🔵 [executeCommand] inputPipe exists: \(inputPipe != nil)")
+        print("🔵 [executeCommand] command: \(command)")
+        
+        guard isConnected else {
+            print("🔴 [executeCommand] Not connected!")
             completion("错误：未连接")
             return
         }
         
-        commandQueue.append((command: command, completion: completion))
-        processCommandQueue()
+        guard let inputPipe = inputPipe else {
+            print("🔴 [executeCommand] No input pipe!")
+            completion("错误：输入管道不存在")
+            return
+        }
+        
+        guard let data = (command + "\n").data(using: .utf8) else {
+            print("🔴 [executeCommand] Failed to encode command!")
+            completion("错误：命令编码失败")
+            return
+        }
+        
+        do {
+            print("🟢 [executeCommand] Sending command to SSH...")
+            try inputPipe.fileHandleForWriting.write(contentsOf: data)
+            print("🟢 [executeCommand] Command sent successfully")
+            completion("")
+        } catch {
+            print("🔴 [executeCommand] Failed to write: \(error)")
+            completion("错误：\(error.localizedDescription)")
+        }
     }
     
     private func processCommandQueue() {
@@ -332,8 +356,36 @@ class SSHService: NSObject, ObservableObject {
     }
     
     private func handleOutput(_ output: String) {
-        outputBuffer += output
-        onOutputReceived?(output, .output)
+        let lines = output.components(separatedBy: .newlines)
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            
+            // 过滤不需要显示的内容
+            if trimmed.isEmpty ||
+               trimmed.hasPrefix("===") ||
+               trimmed.hasPrefix("debug") ||
+               trimmed.hasPrefix("spawn ") ||
+               trimmed.contains("Starting SSH connection") ||
+               trimmed.contains("Waiting for password") ||
+               trimmed.contains("PASSWORD PROMPT") ||
+               trimmed.contains("PASSWORD SENT") ||
+               trimmed.contains("Got shell prompt") ||
+               trimmed.contains("SSH_CONNECTION_READY") ||
+               trimmed.contains("Connection established") ||
+               trimmed.contains("entering interactive mode") ||
+               trimmed.contains("Warning:") ||
+               trimmed.contains("OpenSSH_") ||
+               trimmed.contains("LibreSSL") ||
+               trimmed.contains("stty:") ||
+               trimmed.contains("TIOCGETD") ||
+               trimmed.contains("Permission denied, please try again") ||
+               trimmed.contains("ERROR:") {
+                continue
+            }
+            
+            outputBuffer += line + "\n"
+            onOutputReceived?(line, .output)
+        }
     }
     
     private func handleError(_ error: String) {
