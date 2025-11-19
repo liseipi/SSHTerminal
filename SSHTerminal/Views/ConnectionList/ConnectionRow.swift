@@ -68,7 +68,7 @@ struct ConnectionRow: View {
         .padding()
         .background(isActive ? Color.blue.opacity(0.1) : Color.clear)
         .contentShape(Rectangle())
-        .onTapGesture {
+        .onTapGesture(count: 2) {
             if !isConnecting {
                 onConnect()
             }
