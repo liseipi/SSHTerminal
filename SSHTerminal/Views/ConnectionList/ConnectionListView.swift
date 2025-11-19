@@ -11,14 +11,19 @@ struct ConnectionListView: View {
                     .font(.headline)
                 Spacer()
                 
-                // 连接状态指示器
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(viewModel.activeConnection != nil ? Color.green : Color.gray)
-                        .frame(width: 8, height: 8)
-                    Text(viewModel.connectionStatus)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                // 已连接的 Tab 数量
+                if !viewModel.tabs.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: "square.stack.3d.up.fill")
+                            .font(.caption)
+                        Text("\(viewModel.tabs.count)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.blue.opacity(0.1))
+                    .cornerRadius(4)
                 }
                 
                 Button(action: { viewModel.showAddForm.toggle() }) {
@@ -41,16 +46,15 @@ struct ConnectionListView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(viewModel.connections) { connection in
+                        let hasActiveTab = viewModel.tabs.contains { $0.connection.id == connection.id }
+                        
                         ConnectionRow(
                             connection: connection,
-                            isActive: viewModel.activeConnection?.id == connection.id,
-                            isConnecting: viewModel.isConnecting && viewModel.activeConnection?.id == connection.id,
+                            isActive: hasActiveTab,
+                            isConnecting: viewModel.isConnecting,
                             onConnect: {
-                                if viewModel.activeConnection?.id == connection.id {
-                                    viewModel.disconnect()
-                                } else {
-                                    viewModel.connect(to: connection)
-                                }
+                                // 双击创建新 Tab
+                                viewModel.createTab(for: connection)
                             },
                             onEdit: { viewModel.editConnection(connection) },
                             onDelete: { viewModel.deleteConnection(connection) }
@@ -58,6 +62,20 @@ struct ConnectionListView: View {
                         Divider()
                     }
                 }
+            }
+            
+            // 底部提示
+            if !viewModel.connections.isEmpty {
+                Divider()
+                HStack {
+                    Image(systemName: "info.circle")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("双击连接打开新标签页")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(8)
             }
         }
         .background(Color(NSColor.controlBackgroundColor))

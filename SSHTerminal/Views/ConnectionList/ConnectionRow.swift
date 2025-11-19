@@ -42,17 +42,14 @@ struct ConnectionRow: View {
                     .buttonStyle(.plain)
                     .help("编辑连接")
                     
-                    // 连接/断开按钮
+                    // 连接状态指示器
                     if isConnecting {
                         ProgressView()
                             .controlSize(.small)
                     } else if isActive {
-                        Button(action: onConnect) {
-                            Image(systemName: "stop.circle.fill")
-                                .foregroundColor(.orange)
-                        }
-                        .buttonStyle(.plain)
-                        .help("断开连接")
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 8, height: 8)
                     }
                     
                     // 删除按钮
@@ -69,6 +66,7 @@ struct ConnectionRow: View {
         .background(isActive ? Color.blue.opacity(0.1) : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
+            // 双击创建新 Tab
             if !isConnecting {
                 onConnect()
             }

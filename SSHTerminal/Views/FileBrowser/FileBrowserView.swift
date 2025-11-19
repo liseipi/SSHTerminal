@@ -4,6 +4,10 @@ struct FileBrowserView: View {
     @ObservedObject var viewModel: SSHTerminalViewModel
     @State private var selectedFile: FileItem?
     
+    var activeTab: TerminalTab? {
+        viewModel.activeTab
+    }
+    
     var body: some View {
         VStack(spacing: 0) {
             // 头部
@@ -12,14 +16,14 @@ struct FileBrowserView: View {
             Divider()
             
             // 主内容
-            if viewModel.activeConnection == nil {
+            if activeTab == nil {
                 disconnectedView
             } else {
                 fileListView
             }
             
             // 底部快捷导航
-            if viewModel.activeConnection != nil {
+            if activeTab != nil {
                 Divider()
                 QuickNavigationBar(viewModel: viewModel)
             }
@@ -36,9 +40,11 @@ struct FileBrowserView: View {
                     .font(.headline)
                 Spacer()
                 
-                if viewModel.activeConnection != nil {
+                if activeTab != nil {
                     Button(action: {
-                        viewModel.loadDirectory(path: viewModel.currentPath)
+                        if let tabId = viewModel.activeTabId {
+                            viewModel.loadDirectory(path: activeTab?.currentPath ?? "~", tabId: tabId)
+                        }
                     }) {
                         Image(systemName: "arrow.clockwise")
                     }
@@ -47,8 +53,8 @@ struct FileBrowserView: View {
                 }
             }
             
-            if viewModel.activeConnection != nil {
-                PathBreadcrumbView(viewModel: viewModel)
+            if let tab = activeTab {
+                PathBreadcrumbView(viewModel: viewModel, tab: tab)
             }
         }
         .padding()
@@ -71,7 +77,9 @@ struct FileBrowserView: View {
                 // 返回上级目录
                 if shouldShowParentDirectory {
                     ParentDirectoryRow {
-                        viewModel.navigateToParent()
+                        if let tabId = viewModel.activeTabId {
+                            viewModel.navigateToParent(tabId: tabId)
+                        }
                     }
                     Divider()
                 }
@@ -83,17 +91,20 @@ struct FileBrowserView: View {
     }
     
     private var shouldShowParentDirectory: Bool {
-        viewModel.currentPath != "~" && viewModel.currentPath != "/"
+        guard let tab = activeTab else { return false }
+        return tab.currentPath != "~" && tab.currentPath != "/"
     }
     
     @ViewBuilder
     private var fileListContent: some View {
-        if viewModel.fileTree.isEmpty && !viewModel.isLoadingFiles {
-            emptyDirectoryView
-        } else if viewModel.isLoadingFiles {
-            loadingView
-        } else {
-            filesView
+        if let tab = activeTab {
+            if tab.fileTree.isEmpty && !tab.isLoadingFiles {
+                emptyDirectoryView
+            } else if tab.isLoadingFiles {
+                loadingView
+            } else {
+                filesView(for: tab)
+            }
         }
     }
     
@@ -115,19 +126,19 @@ struct FileBrowserView: View {
         .padding()
     }
     
-    private var filesView: some View {
-        ForEach(viewModel.fileTree) { item in
+    private func filesView(for tab: TerminalTab) -> some View {
+        ForEach(tab.fileTree) { item in
             FileItemRowView(
                 item: item,
                 isSelected: selectedFile?.id == item.id
             ) {
                 selectedFile = item
                 if item.type == .directory {
-                    viewModel.navigateToDirectory(item.name)
+                    viewModel.navigateToDirectory(item.name, tabId: tab.id)
                 }
             } onDoubleClick: {
                 if item.type == .file {
-                    viewModel.openFile(item.name)
+                    viewModel.openFile(item.name, tabId: tab.id)
                 }
             }
             Divider()
@@ -138,9 +149,10 @@ struct FileBrowserView: View {
 // MARK: - 面包屑导航
 struct PathBreadcrumbView: View {
     @ObservedObject var viewModel: SSHTerminalViewModel
+    let tab: TerminalTab
     
     private var pathComponents: [String] {
-        let path = viewModel.currentPath
+        let path = tab.currentPath
         if path == "~" {
             return ["~"]
         }
@@ -172,7 +184,7 @@ struct PathBreadcrumbView: View {
             
             Button(component) {
                 let targetPath = buildPath(upTo: index)
-                viewModel.loadDirectory(path: targetPath)
+                viewModel.loadDirectory(path: targetPath, tabId: tab.id)
             }
             .buttonStyle(.plain)
             .font(.caption)
@@ -316,7 +328,9 @@ struct QuickNavigationBar: View {
     
     private func quickButton(path: String, icon: String, label: String) -> some View {
         Button(action: {
-            viewModel.loadDirectory(path: path)
+            if let tabId = viewModel.activeTabId {
+                viewModel.loadDirectory(path: path, tabId: tabId)
+            }
         }) {
             VStack(spacing: 4) {
                 Image(systemName: icon)

@@ -3,205 +3,240 @@ import Combine
 
 class SSHTerminalViewModel: ObservableObject {
     @Published var connections: [SSHConnection] = []
-    @Published var activeConnection: SSHConnection?
-    @Published var terminalLines: [TerminalLine] = []
-    @Published var currentCommand: String = ""
-    @Published var fileTree: [FileItem] = []
-    @Published var currentPath: String = "~"
+    @Published var tabs: [TerminalTab] = []
+    @Published var activeTabId: UUID?
     @Published var showAddForm: Bool = false
     @Published var editingConnection: SSHConnection?
     @Published var isConnecting: Bool = false
-    @Published var isLoadingFiles: Bool = false
-    @Published var connectionStatus: String = "未连接"
     
-    private var sshService: SSHService?
-    private var sftpService: SFTPService?
     private let connectionManager = ConnectionManager.shared
     private var cancellables = Set<AnyCancellable>()
     
+    // 当前活动的 Tab
+    var activeTab: TerminalTab? {
+        guard let id = activeTabId else { return nil }
+        return tabs.first(where: { $0.id == id })
+    }
+    
+    // 当前 Tab 的索引
+    private var activeTabIndex: Int? {
+        guard let id = activeTabId else { return nil }
+        return tabs.firstIndex(where: { $0.id == id })
+    }
+    
     init() {
-        // 从持久化存储加载连接
         connectionManager.$connections
             .assign(to: \.connections, on: self)
             .store(in: &cancellables)
     }
     
+    // MARK: - Tab 管理
+    
+    func createTab(for connection: SSHConnection) {
+        print("🔵 [ViewModel] createTab() called for: \(connection.name)")
+        
+        // 检查是否已有该连接的 Tab
+        if let existingTab = tabs.first(where: { $0.connection.id == connection.id }) {
+            print("🟡 [ViewModel] Tab already exists, switching to it")
+            activeTabId = existingTab.id
+            return
+        }
+        
+        // 创建新 Tab
+        let newTab = TerminalTab(connection: connection)
+        tabs.append(newTab)
+        activeTabId = newTab.id
+        
+        // 自动连接
+        connect(to: connection, tabId: newTab.id)
+    }
+    
+    func closeTab(_ tabId: UUID) {
+        print("🔵 [ViewModel] closeTab() called for: \(tabId)")
+        
+        // 找到要关闭的 Tab
+        guard let index = tabs.firstIndex(where: { $0.id == tabId }) else { return }
+        
+        // 断开连接
+        if let service = tabs[index].sshService {
+            service.disconnect()
+        }
+        
+        // 移除 Tab
+        tabs.remove(at: index)
+        
+        // 如果关闭的是当前 Tab,切换到其他 Tab
+        if activeTabId == tabId {
+            activeTabId = tabs.last?.id
+        }
+    }
+    
+    func switchTab(to tabId: UUID) {
+        activeTabId = tabId
+    }
+    
     // MARK: - 连接管理
     
-    func connect(to connection: SSHConnection) {
-        print("🔵 [ViewModel] connect() called")
-        print("🔵 [ViewModel] Connection: \(connection.name)")
-        print("🔵 [ViewModel] isConnecting: \(isConnecting)")
+    func connect(to connection: SSHConnection, tabId: UUID) {
+        print("🔵 [ViewModel] connect() called for tab: \(tabId)")
         
+        guard let index = tabs.firstIndex(where: { $0.id == tabId }) else { return }
         guard !isConnecting else {
             print("⚠️ [ViewModel] Already connecting, ignoring request")
             return
         }
         
         isConnecting = true
-        connectionStatus = "正在连接..."
-        
-        print("🔵 [ViewModel] Adding system message to terminal")
+        tabs[index].connectionStatus = "正在连接..."
         
         // 添加系统消息
-        terminalLines.append(TerminalLine(
+        tabs[index].terminalLines.append(TerminalLine(
             text: "正在连接到 \(connection.username)@\(connection.host):\(connection.port)...",
             type: .system
         ))
         
-        print("🔵 [ViewModel] Creating SSHService")
-        
         // 创建 SSH 服务
         let service = SSHService()
-        sshService = service
-        
-        print("🔵 [ViewModel] Setting up service observers")
+        tabs[index].sshService = service
         
         // 监听连接状态
         service.$isConnected
             .sink { [weak self] isConnected in
                 print("🔵 [ViewModel] isConnected changed to: \(isConnected)")
                 if isConnected {
-                    self?.handleConnectionSuccess(connection)
+                    self?.handleConnectionSuccess(tabId: tabId)
                 }
             }
             .store(in: &cancellables)
         
         // 监听输出
         service.onOutputReceived = { [weak self] output, type in
-            print("🔵 [ViewModel] Output received: \(output)")
-            self?.handleTerminalOutput(output, type: type)
+            self?.handleTerminalOutput(output, type: type, tabId: tabId)
         }
-        
-        print("🟢 [ViewModel] Calling service.connect()")
         
         // 发起连接
         service.connect(to: connection) { [weak self] result in
-            print("🔵 [ViewModel] Connection result received")
             DispatchQueue.main.async {
                 self?.isConnecting = false
+                
+                guard let self = self,
+                      let index = self.tabs.firstIndex(where: { $0.id == tabId }) else { return }
                 
                 switch result {
                 case .success():
                     print("🟢 [ViewModel] Connection successful!")
-                    self?.activeConnection = connection
-                    self?.connectionStatus = "已连接"
-                    self?.terminalLines.append(TerminalLine(
+                    self.tabs[index].connectionStatus = "已连接"
+                    self.tabs[index].terminalLines.append(TerminalLine(
                         text: "✓ 成功连接到 \(connection.name)",
                         type: .system
                     ))
                     
                     // 初始化 SFTP 服务
-                    self?.sftpService = SFTPService(connection: connection)
+                    self.tabs[index].sftpService = SFTPService(connection: connection)
                     
                     // 自动获取当前路径
-                    self?.getCurrentDirectory()
+                    self.getCurrentDirectory(tabId: tabId)
                     
                 case .failure(let error):
                     print("🔴 [ViewModel] Connection failed: \(error)")
-                    self?.connectionStatus = "连接失败"
-                    self?.terminalLines.append(TerminalLine(
+                    self.tabs[index].connectionStatus = "连接失败"
+                    self.tabs[index].terminalLines.append(TerminalLine(
                         text: "✗ 连接失败: \(error.localizedDescription)",
                         type: .error
                     ))
                 }
             }
         }
-        
-        print("🟢 [ViewModel] connect() method completed")
     }
     
-    private func handleConnectionSuccess(_ connection: SSHConnection) {
+    private func handleConnectionSuccess(tabId: UUID) {
         // 连接成功后的初始化工作
     }
     
-    func disconnect() {
-        guard let connection = activeConnection else { return }
+    func disconnect(tabId: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == tabId }) else { return }
         
-        terminalLines.append(TerminalLine(
+        tabs[index].terminalLines.append(TerminalLine(
             text: "\n正在断开连接...",
             type: .system
         ))
         
-        sshService?.disconnect()
-        sshService = nil
-        sftpService = nil
-        activeConnection = nil
-        connectionStatus = "未连接"
-        fileTree = []
-        currentPath = "~"
+        tabs[index].sshService?.disconnect()
+        tabs[index].sshService = nil
+        tabs[index].sftpService = nil
+        tabs[index].connectionStatus = "未连接"
+        tabs[index].fileTree = []
+        tabs[index].currentPath = "~"
         
-        terminalLines.append(TerminalLine(
-            text: "✓ 已断开与 \(connection.name) 的连接\n",
+        tabs[index].terminalLines.append(TerminalLine(
+            text: "✓ 已断开连接\n",
             type: .system
         ))
     }
     
     // MARK: - 命令执行
     
-    func executeCommand() {
-        guard let connection = activeConnection,
-              let service = sshService,
-              !currentCommand.isEmpty else { return }
+    func executeCommand(tabId: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == tabId }),
+              let service = tabs[index].sshService,
+              !tabs[index].currentCommand.isEmpty else { return }
         
-        let cmd = currentCommand.trimmingCharacters(in: .whitespaces)
+        let cmd = tabs[index].currentCommand.trimmingCharacters(in: .whitespaces)
+        let connection = tabs[index].connection
         
-        // 添加命令行（带提示符）
-        terminalLines.append(TerminalLine(
-            text: "\(connection.username)@\(connection.host):\(currentPath)$ \(cmd)",
+        // 添加命令行
+        tabs[index].terminalLines.append(TerminalLine(
+            text: "\(connection.username)@\(connection.host):\(tabs[index].currentPath)$ \(cmd)",
             type: .command
         ))
         
         // 清空当前输入
-        let commandToExecute = currentCommand
-        currentCommand = ""
+        let commandToExecute = tabs[index].currentCommand
+        tabs[index].currentCommand = ""
         
         // 特殊命令处理
         if cmd.lowercased() == "clear" {
-            clearTerminal()
+            tabs[index].terminalLines.removeAll()
             return
         }
         
         if cmd.lowercased() == "exit" || cmd.lowercased() == "logout" {
-            disconnect()
+            disconnect(tabId: tabId)
             return
         }
         
         // 执行命令
         service.executeCommand(commandToExecute) { [weak self] output in
             DispatchQueue.main.async {
-                guard let self = self else { return }
+                guard let self = self,
+                      let index = self.tabs.firstIndex(where: { $0.id == tabId }) else { return }
                 
-                // 显示输出
                 if !output.isEmpty {
                     let lines = output.components(separatedBy: .newlines)
                     for line in lines where !line.isEmpty {
-                        self.terminalLines.append(TerminalLine(
+                        self.tabs[index].terminalLines.append(TerminalLine(
                             text: line,
                             type: .output
                         ))
                     }
                 }
                 
-                // 如果是 cd 命令，更新路径和文件列表
+                // 如果是 cd 命令,更新路径和文件列表
                 if cmd.lowercased().hasPrefix("cd ") {
-                    self.getCurrentDirectory()
+                    self.getCurrentDirectory(tabId: tabId)
                 }
             }
         }
     }
     
-    private func clearTerminal() {
-        terminalLines.removeAll()
-    }
-    
-    private func handleTerminalOutput(_ output: String, type: TerminalLine.LineType) {
+    private func handleTerminalOutput(_ output: String, type: TerminalLine.LineType, tabId: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == tabId }) else { return }
+        
         let lines = output.components(separatedBy: .newlines)
         for line in lines where !line.isEmpty {
-            // 过滤掉提示符
             let cleanLine = line.trimmingCharacters(in: .whitespaces)
             if !cleanLine.isEmpty && !cleanLine.hasSuffix("$") {
-                terminalLines.append(TerminalLine(
+                tabs[index].terminalLines.append(TerminalLine(
                     text: line,
                     type: type
                 ))
@@ -211,47 +246,51 @@ class SSHTerminalViewModel: ObservableObject {
     
     // MARK: - 目录和文件操作
     
-    private func getCurrentDirectory() {
-        guard let service = sshService else { return }
+    private func getCurrentDirectory(tabId: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == tabId }),
+              let service = tabs[index].sshService else { return }
         
         service.executeCommand("pwd") { [weak self] output in
             DispatchQueue.main.async {
-                guard let self = self else { return }
+                guard let self = self,
+                      let index = self.tabs.firstIndex(where: { $0.id == tabId }) else { return }
+                
                 let path = output.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !path.isEmpty && !path.contains("$") {
-                    self.currentPath = path
-                    self.loadDirectory(path: path)
+                    self.tabs[index].currentPath = path
+                    self.loadDirectory(path: path, tabId: tabId)
                 }
             }
         }
     }
     
-    func loadDirectory(path: String) {
-        guard let service = sftpService else { return }
+    func loadDirectory(path: String, tabId: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == tabId }),
+              let service = tabs[index].sftpService else { return }
         
-        isLoadingFiles = true
+        tabs[index].isLoadingFiles = true
         
         service.listDirectory(path: path) { [weak self] result in
             DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.isLoadingFiles = false
+                guard let self = self,
+                      let index = self.tabs.firstIndex(where: { $0.id == tabId }) else { return }
+                
+                self.tabs[index].isLoadingFiles = false
                 
                 switch result {
                 case .success(let files):
-                    self.fileTree = files.sorted { item1, item2 in
-                        // 目录排在前面
+                    self.tabs[index].fileTree = files.sorted { item1, item2 in
                         if item1.type == .directory && item2.type == .file {
                             return true
                         } else if item1.type == .file && item2.type == .directory {
                             return false
                         }
-                        // 同类型按名称排序
                         return item1.name.localizedCaseInsensitiveCompare(item2.name) == .orderedAscending
                     }
-                    self.currentPath = path
+                    self.tabs[index].currentPath = path
                     
                 case .failure(let error):
-                    self.terminalLines.append(TerminalLine(
+                    self.tabs[index].terminalLines.append(TerminalLine(
                         text: "无法加载目录 \(path): \(error.localizedDescription)",
                         type: .error
                     ))
@@ -260,7 +299,10 @@ class SSHTerminalViewModel: ObservableObject {
         }
     }
     
-    func navigateToDirectory(_ dirName: String) {
+    func navigateToDirectory(_ dirName: String, tabId: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == tabId }) else { return }
+        
+        let currentPath = tabs[index].currentPath
         let newPath: String
         if currentPath == "/" {
             newPath = "/\(dirName)"
@@ -270,105 +312,52 @@ class SSHTerminalViewModel: ObservableObject {
             newPath = currentPath + "/" + dirName
         }
         
-        // 同时在终端中执行 cd 命令
-        currentCommand = "cd \(newPath)"
-        executeCommand()
+        tabs[index].currentCommand = "cd \(newPath)"
+        executeCommand(tabId: tabId)
     }
     
-    func navigateToParent() {
+    func navigateToParent(tabId: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == tabId }) else { return }
+        
+        let currentPath = tabs[index].currentPath
         let components = currentPath.split(separator: "/")
         if components.count > 1 {
             let parentPath = "/" + components.dropLast().joined(separator: "/")
-            loadDirectory(path: parentPath)
-            
-            // 在终端中执行 cd 命令
-            currentCommand = "cd \(parentPath)"
-            executeCommand()
+            loadDirectory(path: parentPath, tabId: tabId)
+            tabs[index].currentCommand = "cd \(parentPath)"
+            executeCommand(tabId: tabId)
         } else if currentPath != "/" && currentPath != "~" {
-            loadDirectory(path: "~")
-            currentCommand = "cd ~"
-            executeCommand()
+            loadDirectory(path: "~", tabId: tabId)
+            tabs[index].currentCommand = "cd ~"
+            executeCommand(tabId: tabId)
         }
     }
     
-    func openFile(_ fileName: String) {
-        guard let connection = activeConnection else { return }
+    func openFile(_ fileName: String, tabId: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == tabId }) else { return }
         
+        let connection = tabs[index].connection
+        let currentPath = tabs[index].currentPath
         let filePath = currentPath.hasSuffix("/") ? currentPath + fileName : currentPath + "/" + fileName
         
-        // 在终端中使用 cat 查看文件内容
-        terminalLines.append(TerminalLine(
+        tabs[index].terminalLines.append(TerminalLine(
             text: "\(connection.username)@\(connection.host):\(currentPath)$ cat \(fileName)",
             type: .command
         ))
         
-        sshService?.executeCommand("cat \(filePath)") { [weak self] output in
+        tabs[index].sshService?.executeCommand("cat \(filePath)") { [weak self] output in
             DispatchQueue.main.async {
-                guard let self = self else { return }
+                guard let self = self,
+                      let index = self.tabs.firstIndex(where: { $0.id == tabId }) else { return }
                 
                 if !output.isEmpty {
                     let lines = output.components(separatedBy: .newlines)
                     for line in lines {
-                        self.terminalLines.append(TerminalLine(
+                        self.tabs[index].terminalLines.append(TerminalLine(
                             text: line,
                             type: .output
                         ))
                     }
-                }
-            }
-        }
-    }
-    
-    func downloadFile(remotePath: String, localPath: String) {
-        guard let service = sftpService else { return }
-        
-        terminalLines.append(TerminalLine(
-            text: "正在下载: \(remotePath) -> \(localPath)",
-            type: .system
-        ))
-        
-        service.downloadFile(remotePath: remotePath, localPath: localPath) { [weak self] result in
-            DispatchQueue.main.async {
-                switch result {
-                case .success():
-                    self?.terminalLines.append(TerminalLine(
-                        text: "✓ 下载完成",
-                        type: .system
-                    ))
-                    
-                case .failure(let error):
-                    self?.terminalLines.append(TerminalLine(
-                        text: "✗ 下载失败: \(error.localizedDescription)",
-                        type: .error
-                    ))
-                }
-            }
-        }
-    }
-    
-    func uploadFile(localPath: String, remotePath: String) {
-        guard let service = sftpService else { return }
-        
-        terminalLines.append(TerminalLine(
-            text: "正在上传: \(localPath) -> \(remotePath)",
-            type: .system
-        ))
-        
-        service.uploadFile(localPath: localPath, remotePath: remotePath) { [weak self] result in
-            DispatchQueue.main.async {
-                switch result {
-                case .success():
-                    self?.terminalLines.append(TerminalLine(
-                        text: "✓ 上传完成",
-                        type: .system
-                    ))
-                    self?.loadDirectory(path: self?.currentPath ?? "~")
-                    
-                case .failure(let error):
-                    self?.terminalLines.append(TerminalLine(
-                        text: "✗ 上传失败: \(error.localizedDescription)",
-                        type: .error
-                    ))
                 }
             }
         }
@@ -387,13 +376,9 @@ class SSHTerminalViewModel: ObservableObject {
         showAddForm = false
         editingConnection = nil
         
-        // 如果更新的是当前连接，断开并提示重新连接
-        if activeConnection?.id == connection.id {
-            terminalLines.append(TerminalLine(
-                text: "连接配置已更新，请重新连接",
-                type: .system
-            ))
-            disconnect()
+        // 如果有使用该连接的 Tab,提示重新连接
+        for tab in tabs where tab.connection.id == connection.id {
+            disconnect(tabId: tab.id)
         }
     }
     
@@ -403,9 +388,10 @@ class SSHTerminalViewModel: ObservableObject {
     }
     
     func deleteConnection(_ connection: SSHConnection) {
-        // 如果正在使用该连接，先断开
-        if activeConnection?.id == connection.id {
-            disconnect()
+        // 关闭所有使用该连接的 Tab
+        let tabsToClose = tabs.filter { $0.connection.id == connection.id }
+        for tab in tabsToClose {
+            closeTab(tab.id)
         }
         connectionManager.deleteConnection(connection)
     }
