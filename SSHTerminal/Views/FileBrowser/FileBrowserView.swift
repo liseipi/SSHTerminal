@@ -184,7 +184,12 @@ struct PathBreadcrumbView: View {
             
             Button(component) {
                 let targetPath = buildPath(upTo: index)
-                viewModel.loadDirectory(path: targetPath, tabId: tab.id)
+                // 在终端中执行 cd 命令
+                if let tabId = viewModel.activeTabId,
+                   let tabIndex = viewModel.tabs.firstIndex(where: { $0.id == tabId }) {
+                    viewModel.tabs[tabIndex].currentCommand = "cd \(targetPath)"
+                    viewModel.executeCommand(tabId: tabId)
+                }
             }
             .buttonStyle(.plain)
             .font(.caption)
@@ -329,7 +334,11 @@ struct QuickNavigationBar: View {
     private func quickButton(path: String, icon: String, label: String) -> some View {
         Button(action: {
             if let tabId = viewModel.activeTabId {
-                viewModel.loadDirectory(path: path, tabId: tabId)
+                // 先在终端中执行 cd 命令
+                if let index = viewModel.tabs.firstIndex(where: { $0.id == tabId }) {
+                    viewModel.tabs[index].currentCommand = "cd \(path)"
+                    viewModel.executeCommand(tabId: tabId)
+                }
             }
         }) {
             VStack(spacing: 4) {

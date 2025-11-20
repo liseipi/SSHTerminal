@@ -59,6 +59,7 @@ class SSHTerminalViewModel: ObservableObject {
         
         // 断开连接
         if let service = tabs[index].sshService {
+            print("🔵 [ViewModel] Disconnecting service for tab")
             service.disconnect()
         }
         
@@ -72,7 +73,19 @@ class SSHTerminalViewModel: ObservableObject {
     }
     
     func switchTab(to tabId: UUID) {
+        print("🔵 [ViewModel] switchTab() to: \(tabId)")
         activeTabId = tabId
+        
+        // 检查切换后的 Tab 状态
+        if let index = tabs.firstIndex(where: { $0.id == tabId }) {
+            print("🔍 [ViewModel] Switched tab status:")
+            print("  - Connection: \(tabs[index].connection.name)")
+            print("  - Status: \(tabs[index].connectionStatus)")
+            print("  - Service exists: \(tabs[index].sshService != nil)")
+            if let service = tabs[index].sshService {
+                print("  - Service isConnected: \(service.isConnected)")
+            }
+        }
     }
     
     // MARK: - 连接管理
@@ -80,7 +93,11 @@ class SSHTerminalViewModel: ObservableObject {
     func connect(to connection: SSHConnection, tabId: UUID) {
         print("🔵 [ViewModel] connect() called for tab: \(tabId)")
         
-        guard let index = tabs.firstIndex(where: { $0.id == tabId }) else { return }
+        guard let index = tabs.firstIndex(where: { $0.id == tabId }) else {
+            print("🔴 [ViewModel] Tab not found!")
+            return
+        }
+        
         guard !isConnecting else {
             print("⚠️ [ViewModel] Already connecting, ignoring request")
             return
@@ -95,19 +112,13 @@ class SSHTerminalViewModel: ObservableObject {
             type: .system
         ))
         
-        // 创建 SSH 服务
+        // 创建 SSH 服务并强引用
         let service = SSHService()
-        tabs[index].sshService = service
+        print("🟢 [ViewModel] Created SSHService instance")
         
-        // 监听连接状态
-        service.$isConnected
-            .sink { [weak self] isConnected in
-                print("🔵 [ViewModel] isConnected changed to: \(isConnected)")
-                if isConnected {
-                    self?.handleConnectionSuccess(tabId: tabId)
-                }
-            }
-            .store(in: &cancellables)
+        // 重要：立即保存到 Tab 中，确保引用不被释放
+        tabs[index].sshService = service
+        print("🟢 [ViewModel] SSHService assigned to tab")
         
         // 监听输出
         service.onOutputReceived = { [weak self] output, type in
@@ -120,22 +131,47 @@ class SSHTerminalViewModel: ObservableObject {
                 self?.isConnecting = false
                 
                 guard let self = self,
-                      let index = self.tabs.firstIndex(where: { $0.id == tabId }) else { return }
+                      let index = self.tabs.firstIndex(where: { $0.id == tabId }) else {
+                    print("🔴 [ViewModel] Tab disappeared during connection")
+                    return
+                }
                 
                 switch result {
                 case .success():
                     print("🟢 [ViewModel] Connection successful!")
-                    self.tabs[index].connectionStatus = "已连接"
-                    self.tabs[index].terminalLines.append(TerminalLine(
-                        text: "✓ 成功连接到 \(connection.name)",
-                        type: .system
-                    ))
                     
-                    // 初始化 SFTP 服务
-                    self.tabs[index].sftpService = SFTPService(connection: connection)
+                    // 验证 service 引用
+                    if self.tabs[index].sshService != nil {
+                        print("🟢 [ViewModel] Service reference is valid")
+                    } else {
+                        print("🔴 [ViewModel] Service reference was lost!")
+                    }
                     
-                    // 自动获取当前路径
-                    self.getCurrentDirectory(tabId: tabId)
+                    // 等待一小段时间确保进程完全初始化
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        guard let idx = self.tabs.firstIndex(where: { $0.id == tabId }) else { return }
+                        
+                        // 再次验证 service
+                        if let svc = self.tabs[idx].sshService {
+                            print("🔍 [ViewModel] Final check:")
+                            print("  - Service exists: true")
+                            print("  - Service isConnected: \(svc.isConnected)")
+                        } else {
+                            print("🔴 [ViewModel] Service lost after delay!")
+                        }
+                        
+                        self.tabs[idx].connectionStatus = "已连接"
+                        self.tabs[idx].terminalLines.append(TerminalLine(
+                            text: "✓ 成功连接到 \(connection.name)",
+                            type: .system
+                        ))
+                        
+                        // 初始化 SFTP 服务
+                        self.tabs[idx].sftpService = SFTPService(connection: connection)
+                        
+                        // 自动获取当前路径
+                        self.getCurrentDirectory(tabId: tabId)
+                    }
                     
                 case .failure(let error):
                     print("🔴 [ViewModel] Connection failed: \(error)")
@@ -147,10 +183,6 @@ class SSHTerminalViewModel: ObservableObject {
                 }
             }
         }
-    }
-    
-    private func handleConnectionSuccess(tabId: UUID) {
-        // 连接成功后的初始化工作
     }
     
     func disconnect(tabId: UUID) {
@@ -177,9 +209,37 @@ class SSHTerminalViewModel: ObservableObject {
     // MARK: - 命令执行
     
     func executeCommand(tabId: UUID) {
-        guard let index = tabs.firstIndex(where: { $0.id == tabId }),
-              let service = tabs[index].sshService,
-              !tabs[index].currentCommand.isEmpty else { return }
+        print("🔵 [ViewModel.executeCommand] Called for tab: \(tabId)")
+        
+        guard let index = tabs.firstIndex(where: { $0.id == tabId }) else {
+            print("🔴 [ViewModel.executeCommand] Tab not found!")
+            return
+        }
+        
+        // 检查 service 引用
+        if tabs[index].sshService == nil {
+            print("🔴 [ViewModel.executeCommand] No SSH service!")
+            tabs[index].terminalLines.append(TerminalLine(
+                text: "错误：SSH 服务不存在，请重新连接",
+                type: .error
+            ))
+            return
+        }
+        
+        guard let service = tabs[index].sshService else {
+            print("🔴 [ViewModel.executeCommand] Service guard failed")
+            return
+        }
+        
+        guard !tabs[index].currentCommand.isEmpty else {
+            print("🔴 [ViewModel.executeCommand] Empty command")
+            return
+        }
+        
+        print("🟢 [ViewModel.executeCommand] Starting command execution")
+        print("  - Tab index: \(index)")
+        print("  - Service exists: \(tabs[index].sshService != nil)")
+        print("  - Command: '\(tabs[index].currentCommand)'")
         
         let cmd = tabs[index].currentCommand.trimmingCharacters(in: .whitespaces)
         let connection = tabs[index].connection
@@ -205,13 +265,20 @@ class SSHTerminalViewModel: ObservableObject {
             return
         }
         
+        // 检查是否是 cd 命令
+        let isCdCommand = cmd.lowercased().hasPrefix("cd ")
+        
+        print("🟢 [ViewModel.executeCommand] Calling service.executeCommand")
+        
         // 执行命令
         service.executeCommand(commandToExecute) { [weak self] output in
             DispatchQueue.main.async {
                 guard let self = self,
                       let index = self.tabs.firstIndex(where: { $0.id == tabId }) else { return }
                 
-                if !output.isEmpty {
+                print("🟢 [ViewModel.executeCommand] Got response: '\(output)'")
+                
+                if !output.isEmpty && !output.hasPrefix("错误") {
                     let lines = output.components(separatedBy: .newlines)
                     for line in lines where !line.isEmpty {
                         self.tabs[index].terminalLines.append(TerminalLine(
@@ -219,11 +286,18 @@ class SSHTerminalViewModel: ObservableObject {
                             type: .output
                         ))
                     }
+                } else if output.hasPrefix("错误") {
+                    self.tabs[index].terminalLines.append(TerminalLine(
+                        text: output,
+                        type: .error
+                    ))
                 }
                 
-                // 如果是 cd 命令,更新路径和文件列表
-                if cmd.lowercased().hasPrefix("cd ") {
-                    self.getCurrentDirectory(tabId: tabId)
+                // 如果是 cd 命令,延迟一下再更新路径和文件列表
+                if isCdCommand && !output.hasPrefix("错误") {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        self.getCurrentDirectory(tabId: tabId)
+                    }
                 }
             }
         }
@@ -248,7 +322,12 @@ class SSHTerminalViewModel: ObservableObject {
     
     private func getCurrentDirectory(tabId: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == tabId }),
-              let service = tabs[index].sshService else { return }
+              let service = tabs[index].sshService else {
+            print("🔴 [getCurrentDirectory] No service found for tab: \(tabId)")
+            return
+        }
+        
+        print("🟢 [getCurrentDirectory] Executing pwd command")
         
         service.executeCommand("pwd") { [weak self] output in
             DispatchQueue.main.async {
@@ -256,9 +335,13 @@ class SSHTerminalViewModel: ObservableObject {
                       let index = self.tabs.firstIndex(where: { $0.id == tabId }) else { return }
                 
                 let path = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !path.isEmpty && !path.contains("$") {
+                print("🟢 [getCurrentDirectory] Got path: '\(path)'")
+                
+                if !path.isEmpty && !path.contains("$") && !path.contains("错误") {
                     self.tabs[index].currentPath = path
                     self.loadDirectory(path: path, tabId: tabId)
+                } else {
+                    print("🔴 [getCurrentDirectory] Invalid path output")
                 }
             }
         }
@@ -266,8 +349,12 @@ class SSHTerminalViewModel: ObservableObject {
     
     func loadDirectory(path: String, tabId: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == tabId }),
-              let service = tabs[index].sftpService else { return }
+              let service = tabs[index].sftpService else {
+            print("🔴 [loadDirectory] No SFTP service for tab: \(tabId)")
+            return
+        }
         
+        print("🟢 [loadDirectory] Loading directory: \(path)")
         tabs[index].isLoadingFiles = true
         
         service.listDirectory(path: path) { [weak self] result in
@@ -279,6 +366,7 @@ class SSHTerminalViewModel: ObservableObject {
                 
                 switch result {
                 case .success(let files):
+                    print("🟢 [loadDirectory] Got \(files.count) files")
                     self.tabs[index].fileTree = files.sorted { item1, item2 in
                         if item1.type == .directory && item2.type == .file {
                             return true
@@ -290,6 +378,7 @@ class SSHTerminalViewModel: ObservableObject {
                     self.tabs[index].currentPath = path
                     
                 case .failure(let error):
+                    print("🔴 [loadDirectory] Error: \(error)")
                     self.tabs[index].terminalLines.append(TerminalLine(
                         text: "无法加载目录 \(path): \(error.localizedDescription)",
                         type: .error
@@ -323,11 +412,9 @@ class SSHTerminalViewModel: ObservableObject {
         let components = currentPath.split(separator: "/")
         if components.count > 1 {
             let parentPath = "/" + components.dropLast().joined(separator: "/")
-            loadDirectory(path: parentPath, tabId: tabId)
             tabs[index].currentCommand = "cd \(parentPath)"
             executeCommand(tabId: tabId)
         } else if currentPath != "/" && currentPath != "~" {
-            loadDirectory(path: "~", tabId: tabId)
             tabs[index].currentCommand = "cd ~"
             executeCommand(tabId: tabId)
         }

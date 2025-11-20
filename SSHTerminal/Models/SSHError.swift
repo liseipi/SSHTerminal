@@ -8,6 +8,7 @@ enum SSHError: LocalizedError {
     case commandFailed(String)
     case invalidOutput
     case authenticationFailed
+    case timeout
     
     var errorDescription: String? {
         switch self {
@@ -25,6 +26,8 @@ enum SSHError: LocalizedError {
             return "无效的输出格式"
         case .authenticationFailed:
             return "认证失败"
+        case .timeout:
+            return "认证超时"
         }
     }
 }
