@@ -104,14 +104,8 @@ class SSHService: NSObject, ObservableObject {
                 }
                 
                 await MainActor.run {
-                    // 输出到终端
-                    if !output.isEmpty {
-                        let lines = output.components(separatedBy: .newlines)
-                        for line in lines where !line.isEmpty {
-                            self.onOutputReceived?(line, .output)
-                        }
-                    }
-                    
+                    // 只通过 completion 返回结果,不使用 onOutputReceived
+                    // 让 ViewModel 决定如何显示输出
                     completion(output)
                 }
                 
