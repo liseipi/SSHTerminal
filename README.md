@@ -1,12 +1,14 @@
-#基于macOS自带的Terminal的连接工具，安全可靠
+# 基于macOS自带的Terminal的连接工具，安全可靠
 
-内嵌 SSH 终端
-密码自动登录
-连接保活（30秒）
-Keychain 安全存储
-无第三方依赖
+## 关键特性
+- 内嵌 SSH 终端
+- 密码自动登录
+- 连接保活（30秒）
+- Keychain 安全存储
+- 无第三方依赖
 
-项目目录结构
+## 项目目录结构
+```
 SSHTerminal/
 ├── SSHTerminal.xcodeproj
 │   └── project.pbxproj
@@ -48,3 +50,4 @@ SSHTerminal/
 │
 └── SSHTerminalUITests/
     └── SSHTerminalUITests.swift
+```
