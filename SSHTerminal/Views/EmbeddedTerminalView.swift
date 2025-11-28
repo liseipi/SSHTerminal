@@ -1,4 +1,4 @@
-import SwiftUI
+internal import SwiftUI
 import AppKit
 
 // MARK: - 内嵌终端视图

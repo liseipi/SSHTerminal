@@ -1,6 +1,6 @@
 import Foundation
 import Combine
-import SwiftUI
+internal import SwiftUI
 
 // MARK: - 连接存储服务
 class ConnectionStorage: ObservableObject {
@@ -51,9 +51,18 @@ class ConnectionStorage: ObservableObject {
     // MARK: - 添加连接
     func addConnection(_ connection: SSHConnection) {
         print("➕ 添加连接: \(connection.name)")
+        print("   ID: \(connection.id.uuidString)")
+        print("   认证方式: \(connection.authMethod.rawValue)")
+        
+        // 调试：列出当前所有 Keychain 项
+        KeychainService.shared.listAllPasswords()
+        
+        // 直接添加，不修改 ID
         connections.append(connection)
         saveConnections()
         objectWillChange.send() // 通知UI更新
+        
+        print("✅ 连接已添加到列表")
     }
     
     // MARK: - 更新连接

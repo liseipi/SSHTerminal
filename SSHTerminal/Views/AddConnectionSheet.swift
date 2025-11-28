@@ -1,4 +1,4 @@
-import SwiftUI
+internal import SwiftUI
 internal import UniformTypeIdentifiers
 
 // MARK: - 添加连接表单
@@ -82,6 +82,14 @@ struct AddConnectionSheet: View {
     }
     
     private func saveConnection() {
+        print("\n" + String(repeating: "=", count: 50))
+        print("📝 开始保存连接")
+        print("   名称: \(name)")
+        print("   主机: \(host)")
+        print("   端口: \(port)")
+        print("   用户: \(username)")
+        print("   认证方式: \(authMethod.rawValue)")
+        
         let tagArray = tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         
         let connection = SSHConnection(
@@ -95,11 +103,32 @@ struct AddConnectionSheet: View {
             tags: tagArray
         )
         
+        print("   连接 ID: \(connection.id.uuidString)")
+        
         // 如果是密码认证，保存密码到 Keychain
         if authMethod == .password && !password.isEmpty {
+            print("   密码长度: \(password.count)")
+            
+            // 先保存密码
             connection.setPassword(password)
+            
+            // 延迟验证，确保保存完成
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                if let saved = connection.password {
+                    print("✅ 密码验证成功，长度: \(saved.count)")
+                } else {
+                    print("❌ 警告：密码验证失败")
+                }
+            }
+        } else if authMethod == .password {
+            print("⚠️ 警告：密码为空")
+        } else {
+            print("   使用密钥认证，密钥路径: \(privateKeyPath)")
         }
         
+        print(String(repeating: "=", count: 50) + "\n")
+        
+        // 保存连接对象
         onSave(connection)
         dismiss()
     }
@@ -144,6 +173,7 @@ struct EditConnectionSheet: View {
         _port = State(initialValue: String(connection.port))
         _username = State(initialValue: connection.username)
         _authMethod = State(initialValue: connection.authMethod)
+        // 从 Keychain 读取密码
         _password = State(initialValue: connection.password ?? "")
         _privateKeyPath = State(initialValue: connection.privateKeyPath ?? "")
         _notes = State(initialValue: connection.notes ?? "")
@@ -236,13 +266,17 @@ struct EditConnectionSheet: View {
         updated.port = Int(port) ?? 22
         updated.username = username
         updated.authMethod = authMethod
-//        updated.password = authMethod == .password ? password : nil
-        if authMethod == .password && !password.isEmpty {
-            updated.setPassword(password)
-        }
         updated.privateKeyPath = authMethod == .publicKey ? privateKeyPath : nil
         updated.notes = notes.isEmpty ? nil : notes
         updated.tags = tagArray
+        
+        // 保存密码到 Keychain
+        if authMethod == .password {
+            updated.setPassword(password.isEmpty ? nil : password)
+        } else {
+            // 如果切换到密钥认证，删除密码
+            updated.setPassword(nil)
+        }
         
         onSave(updated)
         dismiss()

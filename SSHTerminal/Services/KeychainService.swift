@@ -11,10 +11,19 @@ class KeychainService {
     
     // MARK: - 保存密码
     func savePassword(_ password: String, for connectionId: UUID) -> Bool {
-        guard let passwordData = password.data(using: .utf8) else { return false }
+        guard let passwordData = password.data(using: .utf8) else {
+            print("❌ 密码转换为 Data 失败")
+            return false
+        }
+        
+        print("🔐 准备保存密码到 Keychain")
+        print("   Service: \(serviceName)")
+        print("   Account: \(connectionId.uuidString)")
+        print("   密码长度: \(password.count)")
         
         // 先删除旧密码
-        _ = deletePassword(for: connectionId)
+        let deleteStatus = deletePassword(for: connectionId)
+        print("   删除旧密码: \(deleteStatus ? "成功" : "无旧密码")")
         
         // 创建访问控制（允许应用始终访问，无需提示）
         var accessControl: SecAccessControl?
@@ -43,16 +52,21 @@ class KeychainService {
         let status = SecItemAdd(query as CFDictionary, nil)
         
         if status == errSecSuccess {
-            print("✅ 密码已保存到 Keychain")
+            print("✅ 密码已保存到 Keychain (状态: \(status))")
             return true
         } else {
-            print("❌ 保存密码失败: \(status)")
+            print("❌ 保存密码失败 (状态: \(status))")
+            print("   错误描述: \(SecCopyErrorMessageString(status, nil) as String? ?? "未知错误")")
             return false
         }
     }
     
     // MARK: - 获取密码
     func getPassword(for connectionId: UUID) -> String? {
+        print("🔍 从 Keychain 读取密码")
+        print("   Service: \(serviceName)")
+        print("   Account: \(connectionId.uuidString)")
+        
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceName,
@@ -64,13 +78,20 @@ class KeychainService {
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         
-        guard status == errSecSuccess,
-              let passwordData = result as? Data,
-              let password = String(data: passwordData, encoding: .utf8) else {
+        if status == errSecSuccess {
+            if let passwordData = result as? Data,
+               let password = String(data: passwordData, encoding: .utf8) {
+                print("✅ 密码读取成功，长度: \(password.count)")
+                return password
+            } else {
+                print("❌ 密码数据转换失败")
+                return nil
+            }
+        } else {
+            print("❌ 读取密码失败 (状态: \(status))")
+            print("   错误描述: \(SecCopyErrorMessageString(status, nil) as String? ?? "未知错误")")
             return nil
         }
-        
-        return password
     }
     
     // MARK: - 删除密码
@@ -96,5 +117,34 @@ class KeychainService {
         // 尝试读取一个密码来触发授权提示
         // 之后的访问应该就不会再提示了
         print("🔑 请求 Keychain 批量访问权限...")
+    }
+    
+    // MARK: - 调试：列出所有密码项
+    func listAllPasswords() {
+        print("\n🔍 列出所有 Keychain 密码项:")
+        
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll
+        ]
+        
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        
+        if status == errSecSuccess {
+            if let items = result as? [[String: Any]] {
+                print("   找到 \(items.count) 个密码项:")
+                for (index, item) in items.enumerated() {
+                    if let account = item[kSecAttrAccount as String] as? String {
+                        print("   [\(index + 1)] Account: \(account)")
+                    }
+                }
+            }
+        } else {
+            print("   没有找到密码项 (状态: \(status))")
+        }
+        print("")
     }
 }

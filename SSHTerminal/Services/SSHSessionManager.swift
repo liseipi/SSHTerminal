@@ -37,14 +37,36 @@ class SSHSessionManager: ObservableObject {
             let inputPipe = Pipe()
             let outputPipe = Pipe()
             
+            print("🔗 开始连接...")
+            print("   主机: \(connection.host)")
+            print("   端口: \(connection.port)")
+            print("   用户: \(connection.username)")
+            print("   认证方式: \(connection.authMethod.rawValue)")
+            
             // 根据认证方式构建命令
-            if connection.authMethod == .password, let password = connection.password {
-                // 使用 expect 自动输入密码
-                let expectScript = createExpectScript(connection: connection, password: password)
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/expect")
-                process.arguments = [expectScript]
+            if connection.authMethod == .password {
+                if let password = connection.password {
+                    print("🔐 使用密码认证（密码长度: \(password.count)）")
+                    
+                    // 使用 expect 自动输入密码
+                    let expectScript = createExpectScriptFile(connection: connection, password: password)
+                    
+                    if expectScript.isEmpty {
+                        throw NSError(domain: "SSHSession", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法创建 expect 脚本"])
+                    }
+                    
+                    process.executableURL = URL(fileURLWithPath: "/usr/bin/expect")
+                    process.arguments = [expectScript]
+                    
+                    print("📜 expect 脚本: \(expectScript)")
+                } else {
+                    print("❌ 错误: 密码认证但没有密码")
+                    throw NSError(domain: "SSHSession", code: -2, userInfo: [NSLocalizedDescriptionKey: "密码为空"])
+                }
             } else {
                 // 密钥认证
+                print("🔑 使用密钥认证")
+                
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
                 var args = [
                     "-o", "StrictHostKeyChecking=no",
@@ -57,6 +79,7 @@ class SSHSessionManager: ObservableObject {
                 
                 if let keyPath = connection.privateKeyPath {
                     args.append(contentsOf: ["-i", keyPath])
+                    print("   密钥路径: \(keyPath)")
                 }
                 
                 args.append("\(connection.username)@\(connection.host)")
@@ -96,6 +119,8 @@ class SSHSessionManager: ObservableObject {
             // 启动进程
             try process.run()
             
+            print("✅ SSH 进程已启动，PID: \(process.processIdentifier)")
+            
             DispatchQueue.main.async { [weak self] in
                 self?.isConnecting = false
                 self?.isConnected = true
@@ -105,16 +130,19 @@ class SSHSessionManager: ObservableObject {
             // 等待进程结束
             process.waitUntilExit()
             
+            print("⚠️ SSH 进程已退出，状态: \(process.terminationStatus)")
+            
             DispatchQueue.main.async { [weak self] in
                 self?.isConnected = false
                 self?.stopKeepAlive()
                 
                 if process.terminationStatus != 0 {
-                    self?.error = "连接已断开"
+                    self?.error = "连接已断开（退出码: \(process.terminationStatus)）"
                 }
             }
             
         } catch {
+            print("❌ 启动 SSH 会话失败: \(error)")
             DispatchQueue.main.async { [weak self] in
                 self?.isConnecting = false
                 self?.error = "连接失败: \(error.localizedDescription)"
@@ -122,7 +150,90 @@ class SSHSessionManager: ObservableObject {
         }
     }
     
-    // MARK: - 创建 expect 脚本
+    // MARK: - 创建 expect 脚本文件
+    private func createExpectScriptFile(connection: SSHConnection, password: String) -> String {
+        let tempDir: URL
+        if let realTempDir = getenv("TMPDIR") {
+            tempDir = URL(fileURLWithPath: String(cString: realTempDir))
+        } else {
+            tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        }
+        
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let random = UUID().uuidString.prefix(8)
+        let scriptFile = tempDir.appendingPathComponent("ssh_\(timestamp)_\(random).exp")
+        
+        // 转义密码
+        let escapedPwd = password
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "$", with: "\\$")
+            .replacingOccurrences(of: "[", with: "\\[")
+            .replacingOccurrences(of: "]", with: "\\]")
+        
+        let sshCommand = "ssh -p \(connection.port) -o StrictHostKeyChecking=no \(connection.username)@\(connection.host)"
+        
+        let expectScript = """
+        #!/usr/bin/expect -f
+        set timeout 30
+        log_user 0
+        
+        spawn \(sshCommand)
+        
+        expect {
+            -re "(?i)(are you sure|fingerprint)" {
+                send "yes\\r"
+                exp_continue
+            }
+            -re "(?i)(password:|password for|'s password:)" {
+                send "\(escapedPwd)\\r"
+            }
+            "Permission denied" {
+                puts "\\nERROR: Authentication failed"
+                exit 1
+            }
+            timeout {
+                puts "\\nERROR: Connection timeout"
+                exit 1
+            }
+        }
+        
+        expect {
+            -re "\\$|#|>" {
+                log_user 1
+            }
+            "Permission denied" {
+                puts "\\nERROR: Authentication failed"
+                exit 1
+            }
+            timeout {
+                log_user 1
+            }
+        }
+        
+        interact
+        """
+        
+        do {
+            try expectScript.write(to: scriptFile, atomically: true, encoding: .utf8)
+            
+            let chmodProcess = Process()
+            chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
+            chmodProcess.arguments = ["755", scriptFile.path]
+            try? chmodProcess.run()
+            chmodProcess.waitUntilExit()
+            
+            // 延迟删除
+            DispatchQueue.main.asyncAfter(deadline: .now() + 300) {
+                try? FileManager.default.removeItem(at: scriptFile)
+            }
+            
+            return scriptFile.path
+        } catch {
+            print("❌ 创建 expect 脚本失败: \(error)")
+            return ""
+        }
+    }
     private func createExpectScript(connection: SSHConnection, password: String) -> String {
         let tempDir = FileManager.default.temporaryDirectory
         let scriptFile = tempDir.appendingPathComponent("ssh_expect_\(UUID().uuidString).exp")

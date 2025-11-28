@@ -1,17 +1,17 @@
-import SwiftUI
+internal import SwiftUI
 
 struct ConnectionListView: View {
     @StateObject private var storage = ConnectionStorage.shared
     @State private var searchText = ""
     @State private var selectedTag: String?
-    @State private var selectedConnection: SSHConnection?
     @State private var showingAddSheet = false
     @State private var editingConnection: SSHConnection?
     @State private var selectedTerminal: TerminalApp = .terminal
     @State private var showAlert = false
     @State private var alertMessage = ""
     @State private var showKeychainTip = false
-    @State private var useEmbeddedTerminal = true
+    @State private var openTabs: [TerminalTab] = []
+    @State private var selectedTabId: UUID?
     
     var filteredConnections: [SSHConnection] {
         var result = storage.connections
@@ -33,14 +33,15 @@ struct ConnectionListView: View {
     }
     
     var body: some View {
-        NavigationSplitView {
-            sidebar
-        } content: {
-            connectionListContent
-        } detail: {
-            terminalDetail
+        HSplitView {
+            // 左侧：连接列表
+            connectionListPanel
+                .frame(minWidth: 250, idealWidth: 300, maxWidth: 400)
+            
+            // 右侧：多标签终端
+            terminalTabsPanel
+                .frame(minWidth: 600)
         }
-        .navigationSplitViewStyle(.balanced)
         .sheet(isPresented: $showingAddSheet) {
             AddConnectionSheet(onSave: { connection in
                 storage.addConnection(connection)
@@ -84,42 +85,79 @@ struct ConnectionListView: View {
         }
     }
     
-    // MARK: - 侧边栏
-    private var sidebar: some View {
-        List(selection: $selectedTag) {
-            Section("标签") {
-                NavigationLink(value: nil as String?) {
-                    Label("全部连接", systemImage: "square.grid.2x2")
-                }
-                
-                ForEach(storage.allTags, id: \.self) { tag in
-                    NavigationLink(value: tag) {
-                        Label(tag, systemImage: "tag")
+    // MARK: - 连接列表面板
+    private var connectionListPanel: some View {
+        VStack(spacing: 0) {
+            // 工具栏
+            HStack(spacing: 12) {
+                // 搜索框
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                    TextField("搜索连接...", text: $searchText)
+                        .textFieldStyle(.plain)
+                    
+                    if !searchText.isEmpty {
+                        Button(action: { searchText = "" }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
+                .padding(8)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(6)
+                
+                // 添加按钮
+                Button(action: { showingAddSheet = true }) {
+                    Image(systemName: "plus")
+                }
+                .help("添加连接")
             }
-        }
-        .navigationTitle("SSH Manager")
-        .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 250)
-    }
-    
-    // MARK: - 连接列表内容
-    private var connectionListContent: some View {
-        VStack(spacing: 0) {
-            connectionListToolbar
+            .padding()
             
             Divider()
             
+            // 标签筛选
+            if !storage.allTags.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        TagFilterButton(
+                            title: "全部",
+                            isSelected: selectedTag == nil,
+                            action: { selectedTag = nil }
+                        )
+                        
+                        ForEach(storage.allTags, id: \.self) { tag in
+                            TagFilterButton(
+                                title: tag,
+                                isSelected: selectedTag == tag,
+                                action: { selectedTag = tag }
+                            )
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                }
+                
+                Divider()
+            }
+            
+            // 连接列表
             if filteredConnections.isEmpty {
                 emptyState
             } else {
-                List(selection: $selectedConnection) {
+                List {
                     ForEach(filteredConnections) { connection in
                         ConnectionRowCompact(connection: connection)
-                            .tag(connection)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                openConnectionInNewTab(connection)
+                            }
                             .contextMenu {
-                                Button("连接") {
-                                    connectToServer(connection)
+                                Button("在新标签页打开") {
+                                    openConnectionInNewTab(connection)
                                 }
                                 Button("在系统终端打开") {
                                     openInSystemTerminal(connection)
@@ -133,73 +171,102 @@ struct ConnectionListView: View {
                                 }
                             }
                     }
-                    .onDelete { indexSet in
-                        storage.deleteConnections(at: indexSet)
-                    }
                 }
                 .listStyle(.sidebar)
             }
         }
-        .navigationTitle(selectedTag ?? "所有连接")
-        .frame(minWidth: 300, idealWidth: 350)
+        .navigationTitle("SSH 连接")
     }
     
-    // MARK: - 终端详情视图
-    private var terminalDetail: some View {
-        Group {
-            if let connection = selectedConnection {
-                EmbeddedTerminalView(connection: connection)
+    // MARK: - 终端标签页面板
+    private var terminalTabsPanel: some View {
+        VStack(spacing: 0) {
+            // 标签栏
+            if !openTabs.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 0) {
+                        ForEach(openTabs) { tab in
+                            TabButton(
+                                tab: tab,
+                                isSelected: selectedTabId == tab.id,
+                                onSelect: { selectedTabId = tab.id },
+                                onClose: { closeTab(tab) }
+                            )
+                        }
+                    }
+                }
+                .frame(height: 36)
+                .background(Color(NSColor.controlBackgroundColor))
+                
+                Divider()
+            }
+            
+            // 终端内容
+            if let selectedTab = openTabs.first(where: { $0.id == selectedTabId }) {
+                EmbeddedTerminalView(connection: selectedTab.connection)
+                    .id(selectedTab.id)
             } else {
-                terminalPlaceholder
+                welcomeView
             }
         }
-        .frame(minWidth: 600)
     }
     
-    // MARK: - 终端占位符
-    private var terminalPlaceholder: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "terminal")
+    // MARK: - 欢迎视图
+    private var welcomeView: some View {
+        VStack(spacing: 24) {
+            Image(systemName: "terminal.fill")
                 .font(.system(size: 80))
+                .foregroundColor(.accentColor)
+            
+            Text("SSH Terminal Manager")
+                .font(.title)
+                .fontWeight(.bold)
+            
+            Text("选择左侧的连接开始")
+                .font(.title3)
                 .foregroundColor(.secondary)
             
-            Text("选择一个连接")
-                .font(.title2)
-                .fontWeight(.semibold)
+            HStack(spacing: 16) {
+                Button(action: { showingAddSheet = true }) {
+                    Label("添加连接", systemImage: "plus.circle.fill")
+                        .font(.headline)
+                }
+                .buttonStyle(.borderedProminent)
+                
+                Button(action: { /* 打开帮助 */ }) {
+                    Label("使用指南", systemImage: "book.fill")
+                        .font(.headline)
+                }
+                .buttonStyle(.bordered)
+            }
             
-            Text("在左侧列表中点击连接以开始")
-                .foregroundColor(.secondary)
+            Spacer()
+                .frame(height: 40)
+            
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Image(systemName: "1.circle.fill")
+                        .foregroundColor(.accentColor)
+                    Text("点击左侧 + 按钮添加 SSH 连接")
+                }
+                
+                HStack {
+                    Image(systemName: "2.circle.fill")
+                        .foregroundColor(.accentColor)
+                    Text("点击连接名称在新标签页中打开终端")
+                }
+                
+                HStack {
+                    Image(systemName: "3.circle.fill")
+                        .foregroundColor(.accentColor)
+                    Text("支持多个标签页同时连接不同服务器")
+                }
+            }
+            .font(.subheadline)
+            .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(NSColor.windowBackgroundColor))
-    }
-    
-    // MARK: - 连接列表工具栏
-    private var connectionListToolbar: some View {
-        HStack(spacing: 12) {
-            HStack {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                TextField("搜索连接...", text: $searchText)
-                    .textFieldStyle(.plain)
-                
-                if !searchText.isEmpty {
-                    Button(action: { searchText = "" }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(8)
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(6)
-            
-            Button(action: { showingAddSheet = true }) {
-                Label("添加", systemImage: "plus")
-            }
-        }
-        .padding()
     }
     
     // MARK: - 空状态
@@ -227,17 +294,31 @@ struct ConnectionListView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
-    // MARK: - 连接到服务器
-    private func connectToServer(_ connection: SSHConnection) {
-        if useEmbeddedTerminal {
-            selectedConnection = connection
-            storage.updateLastUsed(connection)
-        } else {
-            openInSystemTerminal(connection)
+    // MARK: - 操作方法
+    private func openConnectionInNewTab(_ connection: SSHConnection) {
+        let newTab = TerminalTab(connection: connection)
+        openTabs.append(newTab)
+        selectedTabId = newTab.id
+        storage.updateLastUsed(connection)
+    }
+    
+    private func closeTab(_ tab: TerminalTab) {
+        if let index = openTabs.firstIndex(where: { $0.id == tab.id }) {
+            openTabs.remove(at: index)
+            
+            // 如果关闭的是当前标签，选择相邻的标签
+            if selectedTabId == tab.id {
+                if index < openTabs.count {
+                    selectedTabId = openTabs[index].id
+                } else if !openTabs.isEmpty {
+                    selectedTabId = openTabs.last?.id
+                } else {
+                    selectedTabId = nil
+                }
+            }
         }
     }
     
-    // MARK: - 在系统终端打开
     private func openInSystemTerminal(_ connection: SSHConnection) {
         let success = TerminalLauncher.shared.openConnection(connection, in: selectedTerminal)
         
@@ -250,33 +331,125 @@ struct ConnectionListView: View {
     }
 }
 
+// MARK: - 终端标签页模型
+struct TerminalTab: Identifiable {
+    let id = UUID()
+    let connection: SSHConnection
+    var title: String {
+        connection.name
+    }
+}
+
+// MARK: - 标签按钮
+struct TabButton: View {
+    let tab: TerminalTab
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+    
+    @State private var isHovered = false
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            // 连接状态指示器
+            Circle()
+                .fill(Color.green)
+                .frame(width: 8, height: 8)
+            
+            // 标签标题
+            Text(tab.title)
+                .font(.system(size: 13))
+                .lineLimit(1)
+            
+            // 关闭按钮
+            if isHovered || isSelected {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(isSelected ? Color(NSColor.controlBackgroundColor) : Color.clear)
+        .cornerRadius(6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onSelect()
+        }
+        .onHover { hovering in
+            isHovered = hovering
+        }
+    }
+}
+
+// MARK: - 标签筛选按钮
+struct TagFilterButton: View {
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(isSelected ? Color.accentColor : Color(NSColor.controlBackgroundColor))
+                .foregroundColor(isSelected ? .white : .primary)
+                .cornerRadius(12)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 // MARK: - 紧凑连接行视图
 struct ConnectionRowCompact: View {
     let connection: SSHConnection
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(connection.name)
-                .font(.headline)
+        HStack(spacing: 12) {
+            // 图标
+            Image(systemName: "server.rack")
+                .font(.title3)
+                .foregroundColor(.accentColor)
+                .frame(width: 32, height: 32)
+                .background(Color.accentColor.opacity(0.1))
+                .cornerRadius(6)
             
-            Text(connection.displayDescription)
-                .font(.caption)
-                .foregroundColor(.secondary)
-            
-            if !connection.tags.isEmpty {
-                HStack(spacing: 4) {
-                    ForEach(connection.tags.prefix(2), id: \.self) { tag in
-                        Text(tag)
-                            .font(.caption2)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 2)
-                            .background(Color.accentColor.opacity(0.2))
-                            .cornerRadius(3)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(connection.name)
+                    .font(.headline)
+                
+                Text(connection.displayDescription)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                if !connection.tags.isEmpty {
+                    HStack(spacing: 4) {
+                        ForEach(connection.tags.prefix(3), id: \.self) { tag in
+                            Text(tag)
+                                .font(.caption2)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.accentColor.opacity(0.2))
+                                .cornerRadius(3)
+                        }
                     }
                 }
             }
+            
+            Spacer()
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
     }
 }
 

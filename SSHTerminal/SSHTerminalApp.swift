@@ -1,4 +1,4 @@
-import SwiftUI
+internal import SwiftUI
 internal import UniformTypeIdentifiers
 
 @main
