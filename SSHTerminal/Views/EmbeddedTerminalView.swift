@@ -4,7 +4,6 @@ import AppKit
 // MARK: - 内嵌终端视图
 struct EmbeddedTerminalView: View {
     let connection: SSHConnection
-    // ⭐️ 改为从外部传入 session，而不是内部创建
     @ObservedObject var session: SSHSessionManager
     
     var body: some View {
@@ -14,12 +13,15 @@ struct EmbeddedTerminalView: View {
             
             Divider()
             
-            // 终端视图
-            TerminalTextView(session: session)
+            // 终端视图 - 使用原生 Terminal 风格
+            NativeTerminalView(session: session)
+                .onAppear {
+                    print("🟣 [Embedded] 终端视图已出现: \(connection.name)")
+                    print("🟣 [Embedded] Session 状态 - 连接中: \(session.isConnecting), 已连接: \(session.isConnected)")
+                    print("🟣 [Embedded] 当前输出长度: \(session.output.count)")
+                }
         }
         .background(Color.black)
-        // ⭐️ 移除 onAppear 中的自动连接，因为在创建 tab 时已经连接了
-        // 但保留 onDisappear，在视图真正销毁时才断开
     }
     
     // MARK: - 工具栏
@@ -99,24 +101,29 @@ struct EmbeddedTerminalView: View {
     }
 }
 
-// MARK: - 终端 TextView（完整交互）
-struct TerminalTextView: NSViewRepresentable {
+// MARK: - 原生风格终端视图
+struct NativeTerminalView: NSViewRepresentable {
     @ObservedObject var session: SSHSessionManager
+    @State private var isInitialized = false
     
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
-        let textView = TerminalNSTextView()
+        print("🟣 [View] makeNSView 开始，线程: \(Thread.current)")
         
-        // 配置 TextView - 设置为只读显示模式
-        textView.isEditable = false  // 改为不可编辑，只响应键盘事件
+        let scrollView = NSScrollView()
+        let textView = NativeTerminalTextView()
+        
+        // 配置 TextView - 完全模拟 Terminal
+        textView.isEditable = false
         textView.isSelectable = true
         textView.allowsUndo = false
-        textView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        textView.textColor = NSColor.green
+        textView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.textColor = NSColor.white
         textView.backgroundColor = NSColor.black
-        textView.insertionPointColor = NSColor.green
-        textView.textContainerInset = NSSize(width: 12, height: 12)
+        textView.insertionPointColor = NSColor.white
+        textView.textContainerInset = NSSize(width: 4, height: 4)
         textView.autoresizingMask = [.width, .height]
+        
+        // 禁用所有自动替换
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
@@ -124,83 +131,66 @@ struct TerminalTextView: NSViewRepresentable {
         textView.isContinuousSpellCheckingEnabled = false
         textView.isGrammarCheckingEnabled = false
         textView.usesFindBar = true
+        textView.usesAdaptiveColorMappingForDarkAppearance = false
         
         // 配置 TextContainer
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.heightTracksTextView = false
+        textView.textContainer?.lineFragmentPadding = 0
         
         // 配置 ScrollView
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = false
         scrollView.backgroundColor = NSColor.black
+        scrollView.drawsBackground = true
         
+        // ⭐️ 简化：不使用自定义 TextStorage，直接使用默认的
         // 设置 coordinator
         textView.terminalDelegate = context.coordinator
         context.coordinator.textView = textView
         context.coordinator.session = session
         
+        print("🟣 [View] makeNSView 完成")
+        
         return scrollView
     }
     
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let textView = scrollView.documentView as? TerminalNSTextView else { return }
+        guard let textView = scrollView.documentView as? NativeTerminalTextView else {
+            print("⚠️ [View] updateNSView - textView 为空")
+            return
+        }
         
-        // 更新输出
-        if context.coordinator.lastOutput != session.output {
-            let oldOutput = context.coordinator.lastOutput
-            let newOutput = session.output
+        // 更新输出 - 简化版本
+        let newOutput = session.output
+        let oldOutput = context.coordinator.lastOutput
+        
+        guard newOutput != oldOutput else { return }
+        
+        print("🔄 [View] 更新文本，旧: \(oldOutput.count), 新: \(newOutput.count)")
+        
+        context.coordinator.lastOutput = newOutput
+        
+        // ⭐️ 直接设置文本，不使用复杂的 TextStorage
+        let cleanOutput = ANSICleaner.clean(newOutput)
+        
+        if let textStorage = textView.textStorage {
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                .foregroundColor: NSColor.white
+            ]
             
-            // 清理 ANSI 转义序列
-            let cleanedNewOutput = ANSICleaner.clean(newOutput)
-            let cleanedOldOutput = ANSICleaner.clean(oldOutput)
+            let attributedString = NSAttributedString(string: cleanOutput, attributes: attributes)
             
-            context.coordinator.lastOutput = newOutput
+            textStorage.setAttributedString(attributedString)
             
-            // 保存当前的选择范围
-            let selectedRange = textView.selectedRange()
-            let hasSelection = selectedRange.length > 0
+            print("🔄 [View] 文本已更新，长度: \(textStorage.length)")
             
-            // 检查是否在底部（用于决定是否自动滚动）
-            let visibleRect = scrollView.documentVisibleRect
-            let contentHeight = textView.frame.height
-            let scrollPosition = visibleRect.origin.y + visibleRect.height
-            let isNearBottom = contentHeight - scrollPosition < 50
-            
-            // 只追加新内容
-            if cleanedNewOutput.count > cleanedOldOutput.count &&
-               cleanedNewOutput.hasPrefix(cleanedOldOutput) {
-                let newText = String(cleanedNewOutput.dropFirst(cleanedOldOutput.count))
-                let attributed = NSAttributedString(
-                    string: newText,
-                    attributes: [
-                        .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-                        .foregroundColor: NSColor.green
-                    ]
-                )
-                textView.textStorage?.append(attributed)
-            } else {
-                // 完全替换
-                let attributed = NSAttributedString(
-                    string: cleanedNewOutput,
-                    attributes: [
-                        .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-                        .foregroundColor: NSColor.green
-                    ]
-                )
-                textView.textStorage?.setAttributedString(attributed)
-            }
-            
-            // 恢复选择或滚动到底部
-            if hasSelection {
-                // 如果有选中内容，保持选中
-                textView.setSelectedRange(selectedRange)
-                textView.scrollRangeToVisible(selectedRange)
-            } else if isNearBottom {
-                // 如果在底部附近，滚动到最底部
-                let range = NSRange(location: textView.string.count, length: 0)
-                textView.scrollRangeToVisible(range)
-            }
+            // 滚动到底部
+            let range = NSRange(location: textStorage.length, length: 0)
+            textView.scrollRangeToVisible(range)
         }
     }
     
@@ -209,48 +199,36 @@ struct TerminalTextView: NSViewRepresentable {
     }
     
     class Coordinator: NSObject, TerminalTextViewDelegate {
-        var textView: TerminalNSTextView?
+        var textView: NativeTerminalTextView?
         var session: SSHSessionManager?
         var lastOutput = ""
         
-        func terminalTextView(_ textView: TerminalNSTextView, didReceiveInput input: String) {
+        func terminalTextView(_ textView: NativeTerminalTextView, didReceiveInput input: String) {
             session?.sendInput(input)
         }
     }
 }
 
-// MARK: - 自定义 NSTextView
+// MARK: - 原生风格 NSTextView
 protocol TerminalTextViewDelegate: AnyObject {
-    func terminalTextView(_ textView: TerminalNSTextView, didReceiveInput input: String)
+    func terminalTextView(_ textView: NativeTerminalTextView, didReceiveInput input: String)
 }
 
-class TerminalNSTextView: NSTextView {
+class NativeTerminalTextView: NSTextView {
     weak var terminalDelegate: TerminalTextViewDelegate?
-    private var isProcessingInput = false
     
     override func keyDown(with event: NSEvent) {
-        // 防止重复处理
-        guard !isProcessingInput else {
-            print("⚠️ 阻止重复输入")
-            return
-        }
-        
-        isProcessingInput = true
-        defer {
-            isProcessingInput = false
-        }
-        
-        // 不调用 super.keyDown，完全自己处理
         handleKeyEvent(event)
     }
     
     private func handleKeyEvent(_ event: NSEvent) {
         let keyCode = event.keyCode
+        let modifiers = event.modifierFlags
         
         // 处理特殊按键
         switch keyCode {
         case 36: // Enter/Return
-            terminalDelegate?.terminalTextView(self, didReceiveInput: "\n")
+            terminalDelegate?.terminalTextView(self, didReceiveInput: "\r")
             
         case 48: // Tab
             terminalDelegate?.terminalTextView(self, didReceiveInput: "\t")
@@ -262,10 +240,18 @@ class TerminalNSTextView: NSTextView {
             terminalDelegate?.terminalTextView(self, didReceiveInput: "\u{001B}")
             
         case 123: // Left Arrow
-            terminalDelegate?.terminalTextView(self, didReceiveInput: "\u{001B}[D")
+            if modifiers.contains(.option) {
+                terminalDelegate?.terminalTextView(self, didReceiveInput: "\u{001B}b")
+            } else {
+                terminalDelegate?.terminalTextView(self, didReceiveInput: "\u{001B}[D")
+            }
             
         case 124: // Right Arrow
-            terminalDelegate?.terminalTextView(self, didReceiveInput: "\u{001B}[C")
+            if modifiers.contains(.option) {
+                terminalDelegate?.terminalTextView(self, didReceiveInput: "\u{001B}f")
+            } else {
+                terminalDelegate?.terminalTextView(self, didReceiveInput: "\u{001B}[C")
+            }
             
         case 125: // Down Arrow
             terminalDelegate?.terminalTextView(self, didReceiveInput: "\u{001B}[B")
@@ -273,13 +259,13 @@ class TerminalNSTextView: NSTextView {
         case 126: // Up Arrow
             terminalDelegate?.terminalTextView(self, didReceiveInput: "\u{001B}[A")
             
-        case 117: // Forward Delete
+        case 117: // Forward Delete (Fn+Delete)
             terminalDelegate?.terminalTextView(self, didReceiveInput: "\u{001B}[3~")
             
-        case 115: // Home
+        case 115: // Home (Fn+Left)
             terminalDelegate?.terminalTextView(self, didReceiveInput: "\u{001B}[H")
             
-        case 119: // End
+        case 119: // End (Fn+Right)
             terminalDelegate?.terminalTextView(self, didReceiveInput: "\u{001B}[F")
             
         case 116: // Page Up
@@ -290,7 +276,7 @@ class TerminalNSTextView: NSTextView {
             
         default:
             // 检查 Ctrl 组合键
-            if event.modifierFlags.contains(.control) {
+            if modifiers.contains(.control) {
                 handleControlKey(event)
             } else if let chars = event.characters, !chars.isEmpty {
                 // 普通字符
@@ -302,7 +288,6 @@ class TerminalNSTextView: NSTextView {
     private func handleControlKey(_ event: NSEvent) {
         guard let chars = event.charactersIgnoringModifiers?.lowercased() else { return }
         
-        // Ctrl+A-Z 映射到控制字符 0x01-0x1A
         if let char = chars.first, let ascii = char.asciiValue {
             if ascii >= 97 && ascii <= 122 { // a-z
                 let controlChar = Character(UnicodeScalar(ascii - 96))
@@ -311,17 +296,15 @@ class TerminalNSTextView: NSTextView {
         }
     }
     
-    // 完全禁用文本编辑
+    // 禁用文本编辑
     override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
         return false
     }
     
-    // 禁用插入文本
     override func insertText(_ string: Any, replacementRange: NSRange) {
         // 不做任何事
     }
     
-    // 禁用删除
     override func deleteBackward(_ sender: Any?) {
         // 不做任何事
     }
@@ -337,7 +320,7 @@ class TerminalNSTextView: NSTextView {
         }
     }
     
-    // 禁用拼写检查等
+    // 菜单验证
     override func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         let action = menuItem.action
         
@@ -354,7 +337,6 @@ class TerminalNSTextView: NSTextView {
         return false
     }
     
-    // 允许成为第一响应者
     override var acceptsFirstResponder: Bool {
         return true
     }

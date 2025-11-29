@@ -1,7 +1,8 @@
 import Foundation
 import Combine
 
-// MARK: - SSH 会话管理器
+// MARK: - SSH 会话管理器（线程安全版）
+@MainActor
 class SSHSessionManager: ObservableObject {
     @Published var output: String = ""
     @Published var isConnected: Bool = false
@@ -12,26 +13,41 @@ class SSHSessionManager: ObservableObject {
     private var inputPipe: Pipe?
     private var outputPipe: Pipe?
     private var keepAliveTimer: Timer?
-    private var outputQueue = DispatchQueue(label: "ssh.output", qos: .userInteractive)
     
     var connection: SSHConnection?
     
     // MARK: - 连接到服务器
-    func connect(to connection: SSHConnection) {
-        guard !isConnecting && !isConnected else { return }
+    nonisolated func connect(to connection: SSHConnection) {
+        print("🟢 [Session] connect() 被调用，线程: \(Thread.current)")
         
-        self.connection = connection
-        isConnecting = true
-        error = nil
-        output = ""
-        
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.startSSHSession(connection)
+        // 使用 Task 在 MainActor 上执行
+        Task { @MainActor in
+            guard !self.isConnecting && !self.isConnected else {
+                print("⚠️ [Session] 已经在连接中或已连接，忽略")
+                return
+            }
+            
+            self.connection = connection
+            
+            print("🟢 [Session] 更新 UI 状态")
+            self.isConnecting = true
+            self.error = nil
+            self.output = ""
+            
+            print("🟢 [Session] 准备启动 SSH")
+            
+            // 在后台任务中启动 SSH
+            Task.detached { [weak self] in
+                print("🟢 [Session] 后台任务开始")
+                await self?.startSSHSession(connection)
+            }
         }
     }
     
     // MARK: - 启动 SSH 会话
-    private func startSSHSession(_ connection: SSHConnection) {
+    private func startSSHSession(_ connection: SSHConnection) async {
+        print("🟢 [SSH] startSSHSession 开始，线程: \(Thread.current)")
+        
         do {
             let process = Process()
             let inputPipe = Pipe()
@@ -48,7 +64,6 @@ class SSHSessionManager: ObservableObject {
                 if let password = connection.password {
                     print("🔐 使用密码认证（密码长度: \(password.count)）")
                     
-                    // 使用 expect 自动输入密码
                     let expectScript = createExpectScriptFile(connection: connection, password: password)
                     
                     if expectScript.isEmpty {
@@ -64,13 +79,12 @@ class SSHSessionManager: ObservableObject {
                     throw NSError(domain: "SSHSession", code: -2, userInfo: [NSLocalizedDescriptionKey: "密码为空"])
                 }
             } else {
-                // 密钥认证
                 print("🔑 使用密钥认证")
                 
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
                 var args = [
                     "-o", "StrictHostKeyChecking=no",
-                    "-t"  // 强制分配伪终端
+                    "-t"
                 ]
                 
                 if connection.port != 22 {
@@ -90,7 +104,6 @@ class SSHSessionManager: ObservableObject {
             process.standardOutput = outputPipe
             process.standardError = outputPipe
             
-            // 设置环境变量
             var env = ProcessInfo.processInfo.environment
             env["TERM"] = "xterm-256color"
             env["LANG"] = "en_US.UTF-8"
@@ -101,51 +114,68 @@ class SSHSessionManager: ObservableObject {
             self.inputPipe = inputPipe
             self.outputPipe = outputPipe
             
-            // 监听输出
-            outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            print("🟢 [SSH] 设置输出监听器")
+            
+            let fileHandle = outputPipe.fileHandleForReading
+            
+            fileHandle.readabilityHandler = { [weak self] handle in
                 let data = handle.availableData
-                if !data.isEmpty {
-                    if let newOutput = String(data: data, encoding: .utf8) {
-                        self?.outputQueue.async {
-                            DispatchQueue.main.async {
-                                // 直接添加原始输出，不做处理
-                                self?.output.append(newOutput)
-                            }
-                        }
+                guard !data.isEmpty else { return }
+                
+                if let newOutput = String(data: data, encoding: .utf8) {
+                    print("📥 [SSH] 收到输出，长度: \(newOutput.count)")
+                    
+                    // ⭐️ 使用 Task 在 MainActor 上更新
+                    Task { @MainActor [weak self] in
+                        guard let self = self else { return }
+                        print("📥 [SSH] 追加到 output，当前长度: \(self.output.count)")
+                        self.output.append(newOutput)
+                        print("📥 [SSH] 追加后长度: \(self.output.count)")
+                    }
+                } else {
+                    print("⚠️ [SSH] 无法解码输出数据")
+                }
+            }
+            
+            print("🟢 [SSH] 准备启动进程")
+            
+            try process.run()
+            
+            print("✅ SSH 进程已启动，PID: \(process.processIdentifier)")
+            print("🟢 [SSH] 进程正在运行: \(process.isRunning)")
+            
+            // ⭐️ 使用 Task 更新状态
+            await MainActor.run {
+                print("🟢 [SSH] 更新 UI 状态为已连接")
+                self.isConnecting = false
+                self.isConnected = true
+                self.startKeepAlive()
+            }
+            
+            print("🟢 [SSH] 设置进程终止监听")
+            
+            process.terminationHandler = { [weak self] proc in
+                print("⚠️ SSH 进程已退出，状态: \(proc.terminationStatus)")
+                
+                fileHandle.readabilityHandler = nil
+                
+                Task { @MainActor [weak self] in
+                    self?.isConnected = false
+                    self?.stopKeepAlive()
+                    
+                    if proc.terminationStatus != 0 {
+                        self?.error = "连接已断开（退出码: \(proc.terminationStatus)）"
                     }
                 }
             }
             
-            // 启动进程
-            try process.run()
-            
-            print("✅ SSH 进程已启动，PID: \(process.processIdentifier)")
-            
-            DispatchQueue.main.async { [weak self] in
-                self?.isConnecting = false
-                self?.isConnected = true
-                self?.startKeepAlive()
-            }
-            
-            // 等待进程结束
-            process.waitUntilExit()
-            
-            print("⚠️ SSH 进程已退出，状态: \(process.terminationStatus)")
-            
-            DispatchQueue.main.async { [weak self] in
-                self?.isConnected = false
-                self?.stopKeepAlive()
-                
-                if process.terminationStatus != 0 {
-                    self?.error = "连接已断开（退出码: \(process.terminationStatus)）"
-                }
-            }
+            print("🟢 [SSH] startSSHSession 完成，进程在后台运行")
             
         } catch {
             print("❌ 启动 SSH 会话失败: \(error)")
-            DispatchQueue.main.async { [weak self] in
-                self?.isConnecting = false
-                self?.error = "连接失败: \(error.localizedDescription)"
+            await MainActor.run {
+                self.isConnecting = false
+                self.error = "连接失败: \(error.localizedDescription)"
             }
         }
     }
@@ -234,70 +264,15 @@ class SSHSessionManager: ObservableObject {
             return ""
         }
     }
-    private func createExpectScript(connection: SSHConnection, password: String) -> String {
-        let tempDir = FileManager.default.temporaryDirectory
-        let scriptFile = tempDir.appendingPathComponent("ssh_expect_\(UUID().uuidString).exp")
-        
-        let escapedPwd = password
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "$", with: "\\$")
-        
-        let sshCommand = connection.authMethod == .publicKey && connection.privateKeyPath != nil
-            ? "ssh -i \(connection.privateKeyPath!) -p \(connection.port) \(connection.username)@\(connection.host)"
-            : "ssh -p \(connection.port) \(connection.username)@\(connection.host)"
-        
-        let expectScript = """
-        #!/usr/bin/expect -f
-        set timeout 30
-        log_user 1
-        
-        spawn \(sshCommand)
-        
-        expect {
-            -re "(?i)(are you sure|fingerprint)" {
-                send "yes\\r"
-                exp_continue
-            }
-            -re "(?i)(password:|password for)" {
-                send "\(escapedPwd)\\r"
-            }
-            timeout {
-                puts "连接超时"
-                exit 1
-            }
+    
+    // MARK: - 发送输入
+    nonisolated func sendInput(_ text: String) {
+        Task {
+            await sendInputAsync(text)
         }
-        
-        interact
-        """
-        
-        try? expectScript.write(to: scriptFile, atomically: true, encoding: .utf8)
-        
-        // 设置可执行权限
-        let chmodProcess = Process()
-        chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
-        chmodProcess.arguments = ["+x", scriptFile.path]
-        try? chmodProcess.run()
-        chmodProcess.waitUntilExit()
-        
-        // 延迟删除
-        DispatchQueue.main.asyncAfter(deadline: .now() + 300) {
-            try? FileManager.default.removeItem(at: scriptFile)
-        }
-        
-        return scriptFile.path
     }
     
-    // MARK: - 发送命令
-    func sendCommand(_ command: String) {
-        guard let inputPipe = inputPipe, isConnected else { return }
-        
-        let data = (command + "\n").data(using: .utf8)!
-        inputPipe.fileHandleForWriting.write(data)
-    }
-    
-    // MARK: - 发送按键
-    func sendInput(_ text: String) {
+    private func sendInputAsync(_ text: String) async {
         guard let inputPipe = inputPipe, isConnected else { return }
         
         if let data = text.data(using: .utf8) {
@@ -310,23 +285,25 @@ class SSHSessionManager: ObservableObject {
     }
     
     // MARK: - 断开连接
-    func disconnect() {
-        stopKeepAlive()
-        
-        process?.terminate()
-        process = nil
-        inputPipe = nil
-        outputPipe = nil
-        
-        isConnected = false
-        isConnecting = false
+    nonisolated func disconnect() {
+        Task { @MainActor in
+            self.stopKeepAlive()
+            
+            self.process?.terminate()
+            self.process = nil
+            self.inputPipe = nil
+            self.outputPipe = nil
+            
+            self.isConnected = false
+            self.isConnecting = false
+        }
     }
     
     // MARK: - 保持连接活跃
     private func startKeepAlive() {
         // 每 30 秒发送一个空命令保持连接
         keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            self?.sendInput("\0")  // 发送空字符保持连接
+            self?.sendInput("\0")
         }
     }
     
@@ -336,6 +313,8 @@ class SSHSessionManager: ObservableObject {
     }
     
     deinit {
-        disconnect()
+        // ⭐️ 直接清理，不调用 disconnect()
+        process?.terminate()
+        keepAliveTimer?.invalidate()
     }
 }

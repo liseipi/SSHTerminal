@@ -1,4 +1,5 @@
 internal import SwiftUI
+import Combine
 
 struct ConnectionListView: View {
     @StateObject private var storage = ConnectionStorage.shared
@@ -42,6 +43,7 @@ struct ConnectionListView: View {
             terminalTabsPanel
                 .frame(minWidth: 600)
         }
+        .frame(minWidth: 800, minHeight: 600)
         .sheet(isPresented: $showingAddSheet) {
             AddConnectionSheet(onSave: { connection in
                 storage.addConnection(connection)
@@ -201,21 +203,22 @@ struct ConnectionListView: View {
                 Divider()
             }
             
-            // 终端内容 - ⭐️ 关键改动：使用 ZStack 保持所有 tab 的视图
-            ZStack {
-                ForEach(openTabs) { tab in
-                    EmbeddedTerminalView(
-                        connection: tab.connection,
-                        session: tab.session
-                    )
-                    .opacity(selectedTabId == tab.id ? 1 : 0)
-                    .id(tab.id)
+            // 终端内容 - ⭐️ 简化方案：直接渲染，用 id 保持状态
+            if openTabs.isEmpty {
+                welcomeView
+            } else {
+                ZStack {
+                    ForEach(openTabs) { tab in
+                        EmbeddedTerminalView(
+                            connection: tab.connection,
+                            session: tab.session
+                        )
+                        .opacity(selectedTabId == tab.id ? 1 : 0)
+                        .zIndex(selectedTabId == tab.id ? 1 : 0)
+                        .id(tab.id)  // ⭐️ 关键：使用 id 保持视图状态
+                    }
                 }
-                
-                // 如果没有打开的 tab，显示欢迎界面
-                if openTabs.isEmpty {
-                    welcomeView
-                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
     }
@@ -305,17 +308,58 @@ struct ConnectionListView: View {
     
     // MARK: - 操作方法
     private func openConnectionInNewTab(_ connection: SSHConnection) {
+        print("🔵 [UI] 开始打开新标签页: \(connection.name)")
+        print("🔵 [UI] 当前线程: \(Thread.current)")
+        print("🔵 [UI] 是否主线程: \(Thread.isMainThread)")
+        
+        // ⭐️ 如果是密码认证，先检查密码是否存在
+        if connection.authMethod == .password {
+            print("🔵 [UI] 密码认证，检查 Keychain...")
+            
+            // 在后台线程读取密码，避免阻塞 UI
+            DispatchQueue.global(qos: .userInitiated).async {
+                let password = connection.password
+                print("🔵 [BG] Keychain 读取完成，密码存在: \(password != nil)")
+                
+                // ⭐️ 确保在主线程创建视图
+                DispatchQueue.main.async {
+                    print("🔵 [UI] 回到主线程创建视图")
+                    self.createAndConnectTab(connection)
+                }
+            }
+        } else {
+            // ⭐️ 确保在主线程
+            if Thread.isMainThread {
+                createAndConnectTab(connection)
+            } else {
+                DispatchQueue.main.async {
+                    self.createAndConnectTab(connection)
+                }
+            }
+        }
+    }
+    
+    private func createAndConnectTab(_ connection: SSHConnection) {
+        print("🔵 [UI] 创建标签页...")
+        
         // ⭐️ 创建新 tab 时同时创建 session
         let session = SSHSessionManager()
         let newTab = TerminalTab(connection: connection, session: session)
         openTabs.append(newTab)
         selectedTabId = newTab.id
         
-        // 立即连接
-        session.connect(to: connection)
+        print("🔵 [UI] 标签页已创建，ID: \(newTab.id)")
+        
+        // ⭐️ 在后台线程连接，避免阻塞 UI
+        DispatchQueue.global(qos: .userInitiated).async {
+            print("🔵 [BG] 开始连接...")
+            session.connect(to: connection)
+        }
         
         storage.updateLastUsed(connection)
+        print("🔵 [UI] openConnectionInNewTab 完成")
     }
+
     
     private func closeTab(_ tab: TerminalTab) {
         // ⭐️ 关闭 tab 时断开连接
@@ -349,17 +393,46 @@ struct ConnectionListView: View {
     }
 }
 
-// MARK: - 终端标签页模型 - ⭐️ 添加 session 属性
-struct TerminalTab: Identifiable {
+// MARK: - 终端视图包装器
+struct TerminalViewWrapper: View {
+    @ObservedObject var tab: TerminalTab
+    
+    var body: some View {
+        EmbeddedTerminalView(
+            connection: tab.connection,
+            session: tab.session
+        )
+        .onAppear {
+            print("🟣 [Wrapper] 标签页 \(tab.connection.name) 视图已出现")
+            if !tab.isViewCreated {
+                tab.isViewCreated = true
+            }
+        }
+        .onDisappear {
+            print("🟣 [Wrapper] 标签页 \(tab.connection.name) 视图已消失")
+            // 注意：不断开连接，保持会话
+        }
+    }
+}
+
+// MARK: - 终端标签页模型
+class TerminalTab: Identifiable, ObservableObject {
     let id = UUID()
     let connection: SSHConnection
-    let session: SSHSessionManager  // 每个 tab 持有自己的 session
+    let session: SSHSessionManager
+    @Published var isViewCreated = false  // 追踪视图是否已创建
     
     var title: String {
         connection.name
     }
+    
+    init(connection: SSHConnection, session: SSHSessionManager) {
+        self.connection = connection
+        self.session = session
+    }
 }
 
+// MARK: - 标签按钮
 // MARK: - 标签按钮
 struct TabButton: View {
     let tab: TerminalTab

@@ -65,7 +65,8 @@ class ANSITextStorage: NSTextStorage {
                 if Thread.isMainThread {
                     performAppend(chunk)
                 } else {
-                    DispatchQueue.main.sync { [weak self] in
+                    // ⚠️ 使用 async 而不是 sync，避免死锁
+                    DispatchQueue.main.async { [weak self] in
                         self?.performAppend(chunk)
                     }
                 }
@@ -74,6 +75,7 @@ class ANSITextStorage: NSTextStorage {
             if Thread.isMainThread {
                 performAppend(text)
             } else {
+                // ⚠️ 使用 async 而不是 sync
                 DispatchQueue.main.async { [weak self] in
                     self?.performAppend(text)
                 }
@@ -82,15 +84,31 @@ class ANSITextStorage: NSTextStorage {
     }
     
     private func performAppend(_ text: String) {
-        lock.lock()
-        defer { lock.unlock() }
+        print("📝 [TextStorage] performAppend 开始，文本长度: \(text.count)")
         
+        lock.lock()
+        
+        print("📝 [TextStorage] 开始解析 ANSI")
         let parsed = parseANSI(text)
+        print("📝 [TextStorage] ANSI 解析完成，结果长度: \(parsed.length)")
+        
+        print("📝 [TextStorage] beginEditing()")
         beginEditing()
+        
+        print("📝 [TextStorage] storage.append()")
+        let oldLength = storage.length
         storage.append(parsed)
-        let range = NSRange(location: storage.length - parsed.length, length: parsed.length)
+        
+        print("📝 [TextStorage] edited() - 旧长度: \(oldLength), 新长度: \(storage.length)")
+        let range = NSRange(location: oldLength, length: parsed.length)
         edited(.editedCharacters, range: range, changeInLength: parsed.length)
+        
+        print("📝 [TextStorage] endEditing()")
         endEditing()
+        
+        lock.unlock()
+        
+        print("📝 [TextStorage] performAppend 完成，storage 总长度: \(storage.length)")
     }
     
     // MARK: - 替换所有文本
@@ -117,11 +135,15 @@ class ANSITextStorage: NSTextStorage {
         endEditing()
     }
     
-    // MARK: - 解析 ANSI 转义序列
+    // MARK: - 解析 ANSI 转义序列（优化版）
     private func parseANSI(_ text: String) -> NSAttributedString {
+        print("📝 [Parse] 开始解析，文本长度: \(text.count)")
+        
         let result = NSMutableAttributedString()
         var index = text.startIndex
         var pendingText = ""
+        var iterationCount = 0
+        let maxIterations = text.count + 100 // 防止死循环
         
         // 重置状态
         currentForeground = NSColor.white
@@ -131,20 +153,31 @@ class ANSITextStorage: NSTextStorage {
         isReverse = false
         
         while index < text.endIndex {
+            iterationCount += 1
+            
+            // ⭐️ 防止死循环
+            if iterationCount > maxIterations {
+                print("⚠️ [Parse] 达到最大迭代次数，强制退出")
+                break
+            }
+            
             let char = text[index]
             
             // 检测 ESC 序列
-            if char == "\u{001B}" && text.index(after: index) < text.endIndex {
-                // 先输出待处理的文本
-                if !pendingText.isEmpty {
-                    result.append(createAttributedString(pendingText))
-                    pendingText = ""
-                }
-                
-                // 解析 ANSI 序列
-                if let (newIndex, _) = parseANSISequence(text, startIndex: index) {
-                    index = newIndex
-                    continue
+            if char == "\u{001B}" {
+                let nextIndex = text.index(after: index)
+                if nextIndex < text.endIndex {
+                    // 先输出待处理的文本
+                    if !pendingText.isEmpty {
+                        result.append(createAttributedString(pendingText))
+                        pendingText = ""
+                    }
+                    
+                    // 解析 ANSI 序列
+                    if let (newIndex, _) = parseANSISequence(text, startIndex: index) {
+                        index = newIndex
+                        continue
+                    }
                 }
             }
             
@@ -158,10 +191,12 @@ class ANSITextStorage: NSTextStorage {
             result.append(createAttributedString(pendingText))
         }
         
+        print("📝 [Parse] 解析完成，迭代次数: \(iterationCount), 结果长度: \(result.length)")
+        
         return result
     }
     
-    // MARK: - 解析单个 ANSI 序列
+    // MARK: - 解析单个 ANSI 序列（优化版）
     private func parseANSISequence(_ text: String, startIndex: String.Index) -> (String.Index, Bool)? {
         guard text[startIndex] == "\u{001B}" else { return nil }
         
@@ -169,6 +204,8 @@ class ANSITextStorage: NSTextStorage {
         guard index < text.endIndex else { return nil }
         
         let nextChar = text[index]
+        var iterationCount = 0
+        let maxIterations = 100 // 防止死循环
         
         // CSI 序列: ESC [
         if nextChar == "[" {
@@ -177,6 +214,12 @@ class ANSITextStorage: NSTextStorage {
             var currentParam = ""
             
             while index < text.endIndex {
+                iterationCount += 1
+                if iterationCount > maxIterations {
+                    print("⚠️ [Parse] CSI 序列解析超时")
+                    return (index, false)
+                }
+                
                 let char = text[index]
                 
                 if char.isNumber {
@@ -211,9 +254,21 @@ class ANSITextStorage: NSTextStorage {
             // 跳过 OSC 序列（通常用于设置标题等）
             index = text.index(after: index)
             while index < text.endIndex {
+                iterationCount += 1
+                if iterationCount > maxIterations {
+                    print("⚠️ [Parse] OSC 序列解析超时")
+                    return (index, false)
+                }
+                
                 let char = text[index]
-                if char == "\u{0007}" || (char == "\u{001B}" && text.index(after: index) < text.endIndex && text[text.index(after: index)] == "\\") {
+                if char == "\u{0007}" {
                     return (text.index(after: index), true)
+                }
+                if char == "\u{001B}" {
+                    let nextIdx = text.index(after: index)
+                    if nextIdx < text.endIndex && text[nextIdx] == "\\" {
+                        return (text.index(after: nextIdx), true)
+                    }
                 }
                 index = text.index(after: index)
             }
