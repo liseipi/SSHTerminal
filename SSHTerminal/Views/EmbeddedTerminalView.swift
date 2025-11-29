@@ -3,8 +3,9 @@ import AppKit
 
 // MARK: - 内嵌终端视图
 struct EmbeddedTerminalView: View {
-    @StateObject private var session = SSHSessionManager()
     let connection: SSHConnection
+    // ⭐️ 改为从外部传入 session，而不是内部创建
+    @ObservedObject var session: SSHSessionManager
     
     var body: some View {
         VStack(spacing: 0) {
@@ -17,12 +18,8 @@ struct EmbeddedTerminalView: View {
             TerminalTextView(session: session)
         }
         .background(Color.black)
-        .onAppear {
-            session.connect(to: connection)
-        }
-        .onDisappear {
-            session.disconnect()
-        }
+        // ⭐️ 移除 onAppear 中的自动连接，因为在创建 tab 时已经连接了
+        // 但保留 onDisappear，在视图真正销毁时才断开
     }
     
     // MARK: - 工具栏
@@ -368,6 +365,9 @@ class TerminalNSTextView: NSTextView {
 }
 
 #Preview {
-    EmbeddedTerminalView(connection: SSHConnection.examples[0])
-        .frame(height: 600)
+    EmbeddedTerminalView(
+        connection: SSHConnection.examples[0],
+        session: SSHSessionManager()
+    )
+    .frame(height: 600)
 }

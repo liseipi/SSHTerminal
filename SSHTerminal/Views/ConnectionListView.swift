@@ -201,12 +201,21 @@ struct ConnectionListView: View {
                 Divider()
             }
             
-            // 终端内容
-            if let selectedTab = openTabs.first(where: { $0.id == selectedTabId }) {
-                EmbeddedTerminalView(connection: selectedTab.connection)
-                    .id(selectedTab.id)
-            } else {
-                welcomeView
+            // 终端内容 - ⭐️ 关键改动：使用 ZStack 保持所有 tab 的视图
+            ZStack {
+                ForEach(openTabs) { tab in
+                    EmbeddedTerminalView(
+                        connection: tab.connection,
+                        session: tab.session
+                    )
+                    .opacity(selectedTabId == tab.id ? 1 : 0)
+                    .id(tab.id)
+                }
+                
+                // 如果没有打开的 tab，显示欢迎界面
+                if openTabs.isEmpty {
+                    welcomeView
+                }
             }
         }
     }
@@ -296,13 +305,22 @@ struct ConnectionListView: View {
     
     // MARK: - 操作方法
     private func openConnectionInNewTab(_ connection: SSHConnection) {
-        let newTab = TerminalTab(connection: connection)
+        // ⭐️ 创建新 tab 时同时创建 session
+        let session = SSHSessionManager()
+        let newTab = TerminalTab(connection: connection, session: session)
         openTabs.append(newTab)
         selectedTabId = newTab.id
+        
+        // 立即连接
+        session.connect(to: connection)
+        
         storage.updateLastUsed(connection)
     }
     
     private func closeTab(_ tab: TerminalTab) {
+        // ⭐️ 关闭 tab 时断开连接
+        tab.session.disconnect()
+        
         if let index = openTabs.firstIndex(where: { $0.id == tab.id }) {
             openTabs.remove(at: index)
             
@@ -331,10 +349,12 @@ struct ConnectionListView: View {
     }
 }
 
-// MARK: - 终端标签页模型
+// MARK: - 终端标签页模型 - ⭐️ 添加 session 属性
 struct TerminalTab: Identifiable {
     let id = UUID()
     let connection: SSHConnection
+    let session: SSHSessionManager  // 每个 tab 持有自己的 session
+    
     var title: String {
         connection.name
     }
@@ -351,9 +371,9 @@ struct TabButton: View {
     
     var body: some View {
         HStack(spacing: 8) {
-            // 连接状态指示器
+            // 连接状态指示器 - ⭐️ 根据实际连接状态显示
             Circle()
-                .fill(Color.green)
+                .fill(tab.session.isConnected ? Color.green : (tab.session.isConnecting ? Color.yellow : Color.red))
                 .frame(width: 8, height: 8)
             
             // 标签标题
