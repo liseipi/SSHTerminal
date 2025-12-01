@@ -1,5 +1,7 @@
 internal import SwiftUI
 internal import UniformTypeIdentifiers
+internal import Combine
+internal import SwiftTerm
 
 @main
 struct SSHTerminalApp: App {
@@ -11,7 +13,6 @@ struct SSHTerminalApp: App {
                 .frame(minWidth: 800, minHeight: 600)
         }
         .commands {
-            // 文件菜单
             CommandGroup(replacing: .newItem) {
                 Button("新建连接") {
                     NotificationCenter.default.post(name: .addConnection, object: nil)
@@ -19,7 +20,6 @@ struct SSHTerminalApp: App {
                 .keyboardShortcut("n", modifiers: .command)
             }
             
-            // 编辑菜单
             CommandGroup(after: .pasteboard) {
                 Divider()
                 Button("导入连接...") {
@@ -33,7 +33,6 @@ struct SSHTerminalApp: App {
                 .keyboardShortcut("e", modifiers: [.command, .shift])
             }
             
-            // 帮助菜单
             CommandGroup(replacing: .help) {
                 Button("SSH 密钥认证指南") {
                     showHelp(.sshKey)
@@ -186,7 +185,6 @@ enum HelpType {
 // MARK: - App Delegate
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // 设置窗口样式
         if let window = NSApplication.shared.windows.first {
             window.titlebarAppearsTransparent = true
             window.toolbarStyle = .unified
@@ -210,7 +208,6 @@ struct SettingsView: View {
     
     var body: some View {
         TabView {
-            // 通用设置
             Form {
                 Section("终端") {
                     Picker("默认终端应用", selection: $defaultTerminal) {
@@ -231,7 +228,6 @@ struct SettingsView: View {
                 Label("通用", systemImage: "gear")
             }
             
-            // 关于
             VStack(spacing: 16) {
                 Image(systemName: "terminal.fill")
                     .font(.system(size: 60))

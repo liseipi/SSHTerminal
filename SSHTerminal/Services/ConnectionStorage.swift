@@ -1,5 +1,5 @@
-import Foundation
-import Combine
+internal import Foundation
+internal import Combine
 internal import SwiftUI
 
 // MARK: - 连接存储服务

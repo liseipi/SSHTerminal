@@ -1,5 +1,5 @@
-import Foundation
-import Security
+internal import Foundation
+internal import Security
 
 // MARK: - Keychain 服务
 class KeychainService {

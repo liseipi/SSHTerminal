@@ -1,4 +1,4 @@
-import Foundation
+internal import Foundation
 
 // MARK: - SSH连接模型
 struct SSHConnection: Identifiable, Codable, Hashable {
