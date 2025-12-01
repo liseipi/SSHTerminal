@@ -306,7 +306,7 @@ class TerminalLauncher {
         let activateScript = "tell application \"Terminal\" to activate"
         if let activate = NSAppleScript(source: activateScript) {
             var activateError: NSDictionary?
-            activate.executeAndReturnError(&activateError)
+            _ = activate.executeAndReturnError(&activateError)
             Thread.sleep(forTimeInterval: 0.5)
         }
         
@@ -315,7 +315,7 @@ class TerminalLauncher {
         }
         
         var error: NSDictionary?
-        let result = appleScript.executeAndReturnError(&error)
+        _ = appleScript.executeAndReturnError(&error)
         
         if let error = error {
             print("❌ AppleScript 错误: \(error)")

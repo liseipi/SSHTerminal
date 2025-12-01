@@ -96,12 +96,17 @@ class SwiftTermSSHManager: ObservableObject {
             self.errorPipe = errorPipe
             
             // 设置输出处理
-            setupOutputHandler(outputPipe.fileHandleForReading)
-            setupOutputHandler(errorPipe.fileHandleForReading)
+            setupOutputHandler(outputPipe.fileHandleForReading, isError: false)
+            setupOutputHandler(errorPipe.fileHandleForReading, isError: true)
             
             try process.run()
             
             print("✅ SSH 进程已启动，PID: \(process.processIdentifier)")
+            if connection.authMethod == .password {
+                print("   使用 expect 脚本进行密码认证")
+            } else {
+                print("   使用密钥认证")
+            }
             
             await MainActor.run {
                 self.isConnecting = false
@@ -110,6 +115,16 @@ class SwiftTermSSHManager: ObservableObject {
             
             process.terminationHandler = { [weak self] proc in
                 print("⚠️ SSH 进程已退出，状态: \(proc.terminationStatus)")
+                
+                // 读取剩余的错误输出
+                if let errorData = try? errorPipe.fileHandleForReading.readToEnd(),
+                   let errorText = String(data: errorData, encoding: .utf8), !errorText.isEmpty {
+                    print("🔴 [SSH Final Error] \(errorText)")
+                }
+                
+                // 清理 readability handler
+                outputPipe.fileHandleForReading.readabilityHandler = nil
+                errorPipe.fileHandleForReading.readabilityHandler = nil
                 
                 Task { @MainActor [weak self] in
                     self?.isConnected = false
@@ -130,10 +145,17 @@ class SwiftTermSSHManager: ObservableObject {
     }
     
     // MARK: - 设置输出处理器
-    private func setupOutputHandler(_ fileHandle: FileHandle) {
+    private func setupOutputHandler(_ fileHandle: FileHandle, isError: Bool = false) {
         fileHandle.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
+            
+            // 打印调试信息
+            if isError {
+                if let text = String(data: data, encoding: .utf8) {
+                    print("🔴 [SSH Error] \(text)")
+                }
+            }
             
             Task { @MainActor [weak self] in
                 self?.onDataReceived?(data)
@@ -191,52 +213,71 @@ class SwiftTermSSHManager: ObservableObject {
         let expectScript = """
         #!/usr/bin/expect -f
         set timeout 30
-        log_user 0
         
+        # 启用日志
+        log_user 1
+        exp_internal 0
+        
+        puts "[Expect] Starting connection..."
         spawn \(sshCommand)
         
         expect {
             -re "(?i)(are you sure|fingerprint)" {
+                puts "[Expect] Host key confirmation detected"
                 send "yes\\r"
                 exp_continue
             }
             -re "(?i)(password:|password for|'s password:)" {
+                puts "[Expect] Password prompt detected, sending password"
                 send "\(escapedPwd)\\r"
+                exp_continue
             }
-            "Permission denied" {
-                puts "\\nERROR: Authentication failed"
+            -re "(?i)permission denied" {
+                puts "[Expect ERROR] Authentication failed: Wrong password"
                 exit 1
             }
-            timeout {
-                puts "\\nERROR: Connection timeout"
+            -re "(?i)connection refused" {
+                puts "[Expect ERROR] Connection refused: Check host and port"
                 exit 1
             }
-        }
-        
-        expect {
+            -re "(?i)no route to host" {
+                puts "[Expect ERROR] No route to host: Check network"
+                exit 1
+            }
+            -re "(?i)name or service not known" {
+                puts "[Expect ERROR] Hostname not resolved"
+                exit 1
+            }
             -re "\\$|#|>" {
-                log_user 1
-            }
-            "Permission denied" {
-                puts "\\nERROR: Authentication failed"
-                exit 1
+                puts "[Expect SUCCESS] Login successful!"
             }
             timeout {
-                log_user 1
+                puts "[Expect ERROR] Connection timeout"
+                exit 1
+            }
+            eof {
+                puts "[Expect ERROR] Connection closed unexpectedly"
+                exit 1
             }
         }
         
+        puts "[Expect] Entering interactive mode"
         interact
         """
         
         do {
             try expectScript.write(to: scriptFile, atomically: true, encoding: .utf8)
             
+            print("📝 Expect 脚本已创建: \(scriptFile.path)")
+            print("   SSH 命令: \(sshCommand)")
+            
             let chmodProcess = Process()
             chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
             chmodProcess.arguments = ["755", scriptFile.path]
             try? chmodProcess.run()
             chmodProcess.waitUntilExit()
+            
+            print("   权限已设置")
             
             DispatchQueue.main.asyncAfter(deadline: .now() + 300) {
                 try? FileManager.default.removeItem(at: scriptFile)
