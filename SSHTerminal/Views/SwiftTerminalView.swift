@@ -106,8 +106,11 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
         // 设置数据接收闭包
         let coordinator = context.coordinator
         session.onDataReceived = { [weak coordinator] data in
+            print("📨 [Session] onDataReceived 触发，数据 \(data.count) 字节")
             coordinator?.feedData(data)
         }
+        
+        print("✅ [Wrapper] 闭包已设置")
         
         DispatchQueue.main.async {
             terminalView.window?.makeFirstResponder(terminalView)
@@ -175,10 +178,19 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
         
         // MARK: - 接收 SSH 输出
         func feedData(_ data: Data) {
-            guard let terminalView = terminalView else { return }
+            print("📥 [Coordinator] feedData 收到 \(data.count) 字节")
+            
+            guard let terminalView = terminalView else {
+                print("⚠️ [Coordinator] terminalView 为 nil")
+                return
+            }
+            
             let buffer = Array(data)
             let arraySlice = buffer[...]
+            
+            print("📥 [Coordinator] 准备 feed 到 TerminalView")
             terminalView.feed(byteArray: arraySlice)
+            print("📥 [Coordinator] feed 完成")
         }
     }
 }

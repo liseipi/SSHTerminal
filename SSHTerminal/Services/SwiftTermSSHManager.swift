@@ -46,15 +46,27 @@ class SwiftTermSSHManager: ObservableObject {
             // 根据认证方式构建命令
             if connection.authMethod == .password {
                 if let password = connection.password {
-                    let expectScript = createExpectScriptFile(connection: connection, password: password)
+                    print("🔐 使用密码认证，密码长度: \(password.count)")
                     
-                    if expectScript.isEmpty {
-                        throw NSError(domain: "SSHSession", code: -1,
-                                    userInfo: [NSLocalizedDescriptionKey: "无法创建 expect 脚本"])
+                    // 检查 sshpass 是否可用
+                    if isCommandAvailable("sshpass") {
+                        print("   使用 sshpass")
+                        process.executableURL = URL(fileURLWithPath: "/usr/bin/sshpass")
+                        process.arguments = ["-p", password, "ssh", "-p", "\(connection.port)",
+                                           "-o", "StrictHostKeyChecking=no", "-t",
+                                           "\(connection.username)@\(connection.host)"]
+                    } else {
+                        print("   sshpass 不可用，使用 expect 脚本")
+                        let expectScript = createExpectScriptFile(connection: connection, password: password)
+                        
+                        if expectScript.isEmpty {
+                            throw NSError(domain: "SSHSession", code: -1,
+                                        userInfo: [NSLocalizedDescriptionKey: "无法创建 expect 脚本"])
+                        }
+                        
+                        process.executableURL = URL(fileURLWithPath: "/usr/bin/expect")
+                        process.arguments = [expectScript]
                     }
-                    
-                    process.executableURL = URL(fileURLWithPath: "/usr/bin/expect")
-                    process.arguments = [expectScript]
                 } else {
                     throw NSError(domain: "SSHSession", code: -2,
                                 userInfo: [NSLocalizedDescriptionKey: "密码为空"])
@@ -151,10 +163,12 @@ class SwiftTermSSHManager: ObservableObject {
             guard !data.isEmpty else { return }
             
             // 打印调试信息
-            if isError {
-                if let text = String(data: data, encoding: .utf8) {
-                    print("🔴 [SSH Error] \(text)")
-                }
+            if let text = String(data: data, encoding: .utf8) {
+                let prefix = isError ? "🔴 [Error]" : "🟢 [Output]"
+                print("\(prefix) 收到 \(data.count) 字节: \(text.prefix(100))")
+            } else {
+                let prefix = isError ? "🔴 [Error]" : "🟢 [Output]"
+                print("\(prefix) 收到 \(data.count) 字节 (非 UTF-8)")
             }
             
             Task { @MainActor [weak self] in
@@ -211,65 +225,50 @@ class SwiftTermSSHManager: ObservableObject {
         let sshCommand = "ssh -p \(connection.port) -o StrictHostKeyChecking=no -t \(connection.username)@\(connection.host)"
         
         let expectScript = """
-        #!/usr/bin/expect -f
-        set timeout 30
-        
-        # 启用日志
-        log_user 1
-        exp_internal 0
-        
-        puts "[Expect] Starting connection..."
-        spawn \(sshCommand)
-        
-        expect {
-            -re "(?i)(are you sure|fingerprint)" {
-                puts "[Expect] Host key confirmation detected"
-                send "yes\\r"
-                exp_continue
-            }
-            -re "(?i)(password:|password for|'s password:)" {
-                puts "[Expect] Password prompt detected, sending password"
-                send "\(escapedPwd)\\r"
-                exp_continue
-            }
-            -re "(?i)permission denied" {
-                puts "[Expect ERROR] Authentication failed: Wrong password"
-                exit 1
-            }
-            -re "(?i)connection refused" {
-                puts "[Expect ERROR] Connection refused: Check host and port"
-                exit 1
-            }
-            -re "(?i)no route to host" {
-                puts "[Expect ERROR] No route to host: Check network"
-                exit 1
-            }
-            -re "(?i)name or service not known" {
-                puts "[Expect ERROR] Hostname not resolved"
-                exit 1
-            }
-            -re "\\$|#|>" {
-                puts "[Expect SUCCESS] Login successful!"
-            }
-            timeout {
-                puts "[Expect ERROR] Connection timeout"
-                exit 1
-            }
-            eof {
-                puts "[Expect ERROR] Connection closed unexpectedly"
-                exit 1
-            }
-        }
-        
-        puts "[Expect] Entering interactive mode"
-        interact
-        """
+#!/usr/bin/expect -f
+set timeout 30
+
+spawn \(sshCommand)
+
+expect {
+    -re "(?i)are you sure" {
+        send "yes\\r"
+        exp_continue
+    }
+    "assword:" {
+        send "\(escapedPwd)\\r"
+        exp_continue
+    }
+    -re "(?i)permission denied" {
+        send_user "Auth failed\\r"
+        exit 1
+    }
+    -re "\\\\$|#" {
+    }
+    timeout {
+        send_user "Timeout\\r"
+        exit 1
+    }
+}
+
+interact
+"""
         
         do {
-            try expectScript.write(to: scriptFile, atomically: true, encoding: .utf8)
+            // 确保使用 ASCII 编码写入
+            guard let scriptData = expectScript.data(using: .ascii) else {
+                print("❌ 无法将脚本转换为 ASCII")
+                return ""
+            }
+            
+            try scriptData.write(to: scriptFile)
             
             print("📝 Expect 脚本已创建: \(scriptFile.path)")
             print("   SSH 命令: \(sshCommand)")
+            print("   脚本内容前 200 字符:")
+            if let preview = String(data: scriptData.prefix(200), encoding: .ascii) {
+                print("   \(preview.replacingOccurrences(of: "\n", with: "\\n"))")
+            }
             
             let chmodProcess = Process()
             chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
@@ -292,5 +291,22 @@ class SwiftTermSSHManager: ObservableObject {
     
     deinit {
         process?.terminate()
+    }
+    
+    // MARK: - 检查命令是否可用
+    private func isCommandAvailable(_ command: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = [command]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
     }
 }
