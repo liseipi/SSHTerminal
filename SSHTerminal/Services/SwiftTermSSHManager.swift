@@ -14,6 +14,7 @@ class SwiftTermSSHManager: ObservableObject {
     private var inputPipe: Pipe?
     private var outputPipe: Pipe?
     private var errorPipe: Pipe?
+    private var keepAliveTimer: Timer?
     
     var connection: SSHConnection?
     
@@ -76,8 +77,9 @@ class SwiftTermSSHManager: ObservableObject {
                 var args = [
                     "-o", "StrictHostKeyChecking=no",
                     "-t",  // 强制分配 PTY
-                    "-o", "ServerAliveInterval=30",
-                    "-o", "ServerAliveCountMax=3"
+                    "-o", "ServerAliveInterval=60",      // 每 60 秒发送 keepalive
+                    "-o", "ServerAliveCountMax=10",      // 最多 10 次无响应
+                    "-o", "TCPKeepAlive=yes"             // 启用 TCP keepalive
                 ]
                 
                 if connection.port != 22 {
@@ -102,20 +104,21 @@ class SwiftTermSSHManager: ObservableObject {
             env["LC_ALL"] = "en_US.UTF-8"
             process.environment = env
             
+            // 设置输出处理
+            setupOutputHandler(outputPipe.fileHandleForReading, isError: false)
+            setupOutputHandler(errorPipe.fileHandleForReading, isError: true)
+            
+            // 先保存引用
             self.process = process
             self.inputPipe = inputPipe
             self.outputPipe = outputPipe
             self.errorPipe = errorPipe
             
-            // 设置输出处理
-            setupOutputHandler(outputPipe.fileHandleForReading, isError: false)
-            setupOutputHandler(errorPipe.fileHandleForReading, isError: true)
-            
             try process.run()
             
             print("✅ SSH 进程已启动，PID: \(process.processIdentifier)")
             if connection.authMethod == .password {
-                print("   使用 expect 脚本进行密码认证")
+                print("   使用密码认证")
             } else {
                 print("   使用密钥认证")
             }
@@ -123,27 +126,30 @@ class SwiftTermSSHManager: ObservableObject {
             await MainActor.run {
                 self.isConnecting = false
                 self.isConnected = true
+                self.startKeepAlive()  // 启动保活定时器
             }
             
             process.terminationHandler = { [weak self] proc in
                 print("⚠️ SSH 进程已退出，状态: \(proc.terminationStatus)")
-                
-                // 读取剩余的错误输出
-                if let errorData = try? errorPipe.fileHandleForReading.readToEnd(),
-                   let errorText = String(data: errorData, encoding: .utf8), !errorText.isEmpty {
-                    print("🔴 [SSH Final Error] \(errorText)")
-                }
                 
                 // 清理 readability handler
                 outputPipe.fileHandleForReading.readabilityHandler = nil
                 errorPipe.fileHandleForReading.readabilityHandler = nil
                 
                 Task { @MainActor [weak self] in
-                    self?.isConnected = false
+                    guard let self = self else { return }
+                    self.stopKeepAlive()  // 停止保活定时器
+                    self.isConnected = false
                     
                     if proc.terminationStatus != 0 {
-                        self?.error = "连接已断开（退出码: \(proc.terminationStatus)）"
+                        self.error = "连接已断开（退出码: \(proc.terminationStatus)）"
                     }
+                    
+                    // 清理进程引用
+                    self.process = nil
+                    self.inputPipe = nil
+                    self.outputPipe = nil
+                    self.errorPipe = nil
                 }
             }
             
@@ -192,6 +198,8 @@ class SwiftTermSSHManager: ObservableObject {
     
     // MARK: - 断开连接
     func disconnect() {
+        stopKeepAlive()
+        
         process?.terminate()
         process = nil
         inputPipe = nil
@@ -200,6 +208,34 @@ class SwiftTermSSHManager: ObservableObject {
         
         isConnected = false
         isConnecting = false
+    }
+    
+    // MARK: - 保活定时器
+    private func startKeepAlive() {
+        // 每 3 分钟（180 秒）发送一个空字节保持连接
+        keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 180, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self, self.isConnected else { return }
+                
+                print("💓 发送保活信号")
+                // 发送一个空字节（不会显示在终端）
+                let keepAliveData = Data([0])
+                self.send(data: keepAliveData)
+            }
+        }
+        
+        // 确保 timer 在主运行循环中
+        if let timer = keepAliveTimer {
+            RunLoop.main.add(timer, forMode: .common)
+        }
+        
+        print("💓 保活定时器已启动（每 3 分钟）")
+    }
+    
+    private func stopKeepAlive() {
+        keepAliveTimer?.invalidate()
+        keepAliveTimer = nil
+        print("💓 保活定时器已停止")
     }
     
     // MARK: - 创建 expect 脚本
@@ -226,7 +262,7 @@ class SwiftTermSSHManager: ObservableObject {
         
         let expectScript = """
 #!/usr/bin/expect -f
-set timeout 30
+set timeout -1
 
 spawn \(sshCommand)
 
@@ -243,7 +279,7 @@ expect {
         send_user "Auth failed\\r"
         exit 1
     }
-    -re "\\\\$|#" {
+    -re "\\\\$|#|>" {
     }
     timeout {
         send_user "Timeout\\r"
@@ -251,7 +287,9 @@ expect {
     }
 }
 
-interact
+interact {
+    timeout -1
+}
 """
         
         do {
@@ -290,6 +328,9 @@ interact
     }
     
     deinit {
+        Task { @MainActor in
+            self.stopKeepAlive()
+        }
         process?.terminate()
     }
     

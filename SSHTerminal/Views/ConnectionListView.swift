@@ -148,7 +148,8 @@ struct ConnectionListView: View {
                     ForEach(filteredConnections) { connection in
                         ConnectionRowCompact(connection: connection)
                             .contentShape(Rectangle())
-                            .onTapGesture {
+                            .onTapGesture(count: 2) {
+                                // 双击打开连接
                                 openConnectionInNewTab(connection)
                             }
                             .contextMenu {
