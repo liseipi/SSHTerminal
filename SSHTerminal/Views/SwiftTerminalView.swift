@@ -1,6 +1,7 @@
 internal import SwiftUI
 internal import SwiftTerm
 internal import Combine
+internal import AppKit
 
 // MARK: - SwiftTerm 终端视图
 struct SwiftTerminalView: View {
@@ -85,18 +86,153 @@ struct SwiftTerminalView: View {
     }
 }
 
+// MARK: - 自定义 TerminalView 类
+class CustomTerminalView: TerminalView {
+    
+    // ⭐️ 拦截快捷键
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // 检查 Cmd+C
+        if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "c" {
+            print("⌨️ 检测到 Cmd+C")
+            handleCopy()
+            return true
+        }
+        
+        // 检查 Cmd+V
+        if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "v" {
+            print("⌨️ 检测到 Cmd+V")
+            handlePaste()
+            return true
+        }
+        
+        return super.performKeyEquivalent(with: event)
+    }
+    
+    // ⭐️ 处理复制
+    private func handleCopy() {
+        print("📋 handleCopy 被调用")
+        
+        guard let selection = getSelection() else {
+            print("⚠️ 没有选中内容")
+            return
+        }
+        
+        print("✅ 有选中内容，开始提取")
+        
+        // 使用反射获取 selection 的属性
+        let mirror = Mirror(reflecting: selection)
+        var startRow = 0, startCol = 0, endRow = 0, endCol = 0
+        
+        for child in mirror.children {
+            if let label = child.label {
+                if label == "start" {
+                    let startMirror = Mirror(reflecting: child.value)
+                    for startChild in startMirror.children {
+                        if startChild.label == "row", let row = startChild.value as? Int {
+                            startRow = row
+                        }
+                        if startChild.label == "col", let col = startChild.value as? Int {
+                            startCol = col
+                        }
+                    }
+                }
+                if label == "end" {
+                    let endMirror = Mirror(reflecting: child.value)
+                    for endChild in endMirror.children {
+                        if endChild.label == "row", let row = endChild.value as? Int {
+                            endRow = row
+                        }
+                        if endChild.label == "col", let col = endChild.value as? Int {
+                            endCol = col
+                        }
+                    }
+                }
+            }
+        }
+        
+        print("📋 选中范围: row[\(startRow):\(endRow)] col[\(startCol):\(endCol)]")
+        
+        // 提取文本
+        guard let term = self.terminal else {
+            print("⚠️ terminal 为 nil")
+            return
+        }
+        
+        var selectedText = ""
+        
+        for row in startRow...endRow {
+            let lineStart = (row == startRow) ? startCol : 0
+            let lineEnd = (row == endRow) ? endCol : term.cols
+            
+            for col in lineStart..<lineEnd {
+                if let charData = term.getCharData(col: col, row: row) {
+                    let character = charData.getCharacter()
+                    selectedText.append(character)
+                }
+            }
+            
+            if row < endRow {
+                selectedText.append("\n")
+            }
+        }
+        
+        // 去除尾部空格
+        selectedText = selectedText.trimmingCharacters(in: .whitespaces)
+        
+        if !selectedText.isEmpty {
+            print("📋 提取到文本: \(selectedText.prefix(100))...")
+            
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(selectedText, forType: .string)
+            
+            print("✅ 已复制到剪贴板")
+            NSSound.beep()
+        } else {
+            print("⚠️ 提取的文本为空")
+        }
+    }
+    
+    // ⭐️ 处理粘贴
+    private func handlePaste() {
+        print("📋 handlePaste 被调用")
+        
+        let pasteboard = NSPasteboard.general
+        guard let text = pasteboard.string(forType: .string) else {
+            print("⚠️ 剪贴板中没有文本")
+            return
+        }
+        
+        print("📋 粘贴文本: \(text.prefix(50))...")
+        
+        if let data = text.data(using: .utf8) {
+            let bytes = [UInt8](data)
+            send(data: bytes[...])
+            print("✅ 已发送到终端")
+        }
+    }
+}
+
 // MARK: - SwiftTerm View Wrapper
 struct SwiftTermViewWrapper: NSViewRepresentable {
     @ObservedObject var session: SwiftTermSSHManager
     
-    func makeNSView(context: Context) -> TerminalView {
-        let terminalView = TerminalView()
+    func makeNSView(context: Context) -> CustomTerminalView {
+        let terminalView = CustomTerminalView()
         
-        terminalView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        // ⭐️ 基本配置
+        terminalView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         terminalView.caretColor = NSColor.white
-        terminalView.selectedTextBackgroundColor = NSColor(red: 0.3, green: 0.4, blue: 0.6, alpha: 0.5)
+        terminalView.selectedTextBackgroundColor = NSColor(red: 0.3, green: 0.5, blue: 0.8, alpha: 0.5)
+        terminalView.nativeBackgroundColor = NSColor.black
+        terminalView.nativeForegroundColor = NSColor.white
         
-        // 设置 SwiftTerm 的 delegate
+        // ⭐️ 关键：禁用鼠标报告，启用本地选择
+        terminalView.allowMouseReporting = false
+        
+        print("✅ [Terminal] allowMouseReporting = \(terminalView.allowMouseReporting)")
+        
+        // 设置 delegate
         terminalView.terminalDelegate = context.coordinator
         
         // 保存引用
@@ -106,23 +242,27 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
         // 设置数据接收闭包
         let coordinator = context.coordinator
         session.onDataReceived = { [weak coordinator] data in
-            print("📨 [Session] onDataReceived 触发，数据 \(data.count) 字节")
             coordinator?.feedData(data)
         }
         
-        print("✅ [Wrapper] 闭包已设置")
+        print("✅ [Wrapper] SwiftTerm 视图已创建")
         
+        // 确保视图可以成为第一响应者
         DispatchQueue.main.async {
             terminalView.window?.makeFirstResponder(terminalView)
+            print("✅ [Wrapper] 设置为第一响应者")
         }
-        
-        print("✅ SwiftTerm 视图已创建")
         
         return terminalView
     }
     
-    func updateNSView(_ terminalView: TerminalView, context: Context) {
-        // SwiftTerm 自动处理
+    func updateNSView(_ terminalView: CustomTerminalView, context: Context) {
+        // 确保视图保持为第一响应者
+        if terminalView.window?.firstResponder != terminalView {
+            DispatchQueue.main.async {
+                terminalView.window?.makeFirstResponder(terminalView)
+            }
+        }
     }
     
     func makeCoordinator() -> Coordinator {
@@ -131,10 +271,10 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
     
     // MARK: - Coordinator
     class Coordinator: NSObject, TerminalViewDelegate {
-        weak var terminalView: TerminalView?
+        weak var terminalView: CustomTerminalView?
         weak var sshSession: SwiftTermSSHManager?
         
-        // MARK: - TerminalViewDelegate (SwiftTerm 必需方法)
+        // MARK: - TerminalViewDelegate
         
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
             let dataArray = Data(data)
@@ -161,11 +301,23 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
             }
         }
         
+        // ⭐️ SwiftTerm 的 clipboardCopy 回调
         func clipboardCopy(source: TerminalView, content: Data) {
-            if let text = String(data: content, encoding: .utf8) {
-                let pasteboard = NSPasteboard.general
-                pasteboard.clearContents()
-                pasteboard.setString(text, forType: .string)
+            print("📋 [clipboardCopy] 被调用！数据大小: \(content.count) 字节")
+            
+            if let text = String(data: content, encoding: .utf8) ??
+                          String(data: content, encoding: .ascii) ??
+                          String(data: content, encoding: .isoLatin1) {
+                
+                print("📋 [clipboardCopy] 文本: \(text.prefix(100))...")
+                
+                DispatchQueue.main.async {
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(text, forType: .string)
+                    print("✅ [clipboardCopy] 已复制到剪贴板")
+                    NSSound.beep()
+                }
             }
         }
         
@@ -176,21 +328,16 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
             NSSound.beep()
         }
         
-        // MARK: - 接收 SSH 输出
+        // MARK: - 数据接收
         func feedData(_ data: Data) {
-            print("📥 [Coordinator] feedData 收到 \(data.count) 字节")
-            
-            guard let terminalView = terminalView else {
-                print("⚠️ [Coordinator] terminalView 为 nil")
-                return
-            }
+            guard let terminalView = terminalView else { return }
             
             let buffer = Array(data)
             let arraySlice = buffer[...]
             
-            print("📥 [Coordinator] 准备 feed 到 TerminalView")
-            terminalView.feed(byteArray: arraySlice)
-            print("📥 [Coordinator] feed 完成")
+            DispatchQueue.main.async {
+                terminalView.feed(byteArray: arraySlice)
+            }
         }
     }
 }

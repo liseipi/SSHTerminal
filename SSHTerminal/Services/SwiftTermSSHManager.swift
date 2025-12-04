@@ -328,10 +328,17 @@ interact {
     }
     
     deinit {
-        Task { @MainActor in
-            self.stopKeepAlive()
-        }
+//        Task { @MainActor in
+//            self.stopKeepAlive()
+//        }
+//        process?.terminate()
+        // 直接停止定时器，不需要 Task
+        keepAliveTimer?.invalidate()
+        keepAliveTimer = nil
+        
         process?.terminate()
+        
+        print("💓 SwiftTermSSHManager 已释放")
     }
     
     // MARK: - 检查命令是否可用
