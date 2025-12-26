@@ -86,130 +86,177 @@ struct SwiftTerminalView: View {
     }
 }
 
-// MARK: - 自定义 TerminalView 类
-class CustomTerminalView: TerminalView {
+// MARK: - 自定义 TerminalView 包装器，支持选择追踪
+class SelectableTerminalView: NSView {
+    let terminalView: TerminalView
+    weak var coordinator: SwiftTermViewWrapper.Coordinator?
     
-    // ⭐️ 拦截快捷键
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        // 检查 Cmd+C
-        if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "c" {
-            print("⌨️ 检测到 Cmd+C")
-            handleCopy()
-            return true
-        }
-        
-        // 检查 Cmd+V
-        if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "v" {
-            print("⌨️ 检测到 Cmd+V")
-            handlePaste()
-            return true
-        }
-        
-        return super.performKeyEquivalent(with: event)
+    // 追踪选择状态
+    private var selectionStart: Position?
+    private var selectionEnd: Position?
+    private var isSelecting = false
+    
+    // 鼠标事件监听器
+    private var mouseMonitor: Any?
+    
+    struct Position {
+        let row: Int
+        let col: Int
     }
     
-    // ⭐️ 处理复制
-    private func handleCopy() {
-        print("📋 handleCopy 被调用")
+    init(terminalView: TerminalView) {
+        self.terminalView = terminalView
+        super.init(frame: .zero)
         
-        guard let selection = getSelection() else {
-            print("⚠️ 没有选中内容")
-            return
-        }
+        addSubview(terminalView)
+        terminalView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            terminalView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            terminalView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            terminalView.topAnchor.constraint(equalTo: topAnchor),
+            terminalView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
         
-        print("✅ 有选中内容，开始提取")
+        setupMouseTracking()
         
-        // 使用反射获取 selection 的属性
-        let mirror = Mirror(reflecting: selection)
-        var startRow = 0, startCol = 0, endRow = 0, endCol = 0
-        
-        for child in mirror.children {
-            if let label = child.label {
-                if label == "start" {
-                    let startMirror = Mirror(reflecting: child.value)
-                    for startChild in startMirror.children {
-                        if startChild.label == "row", let row = startChild.value as? Int {
-                            startRow = row
-                        }
-                        if startChild.label == "col", let col = startChild.value as? Int {
-                            startCol = col
-                        }
-                    }
-                }
-                if label == "end" {
-                    let endMirror = Mirror(reflecting: child.value)
-                    for endChild in endMirror.children {
-                        if endChild.label == "row", let row = endChild.value as? Int {
-                            endRow = row
-                        }
-                        if endChild.label == "col", let col = endChild.value as? Int {
-                            endCol = col
-                        }
-                    }
-                }
+        print("✅ [SelectableTerminalView] 已创建")
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+    
+    // ⭐️ 使用全局鼠标监听器来捕获事件
+    private func setupMouseTracking() {
+        // 监听鼠标按下事件
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
+            guard let self = self,
+                  let window = self.window,
+                  let eventWindow = event.window,
+                  window == eventWindow else {
+                return event
             }
+            
+            // 检查事件是否在我们的视图范围内
+            let locationInWindow = event.locationInWindow
+            let locationInView = self.convert(locationInWindow, from: nil)
+            
+            guard self.bounds.contains(locationInView) else {
+                return event
+            }
+            
+            switch event.type {
+            case .leftMouseDown:
+                if let pos = self.locationToTerminalPosition(locationInView) {
+                    self.selectionStart = pos
+                    self.selectionEnd = pos
+                    self.isSelecting = true
+                    print("🖱️ 开始选择: row=\(pos.row), col=\(pos.col)")
+                }
+                
+            case .leftMouseDragged:
+                if self.isSelecting, let pos = self.locationToTerminalPosition(locationInView) {
+                    self.selectionEnd = pos
+                    print("🖱️ 拖动选择到: row=\(pos.row), col=\(pos.col)")
+                }
+                
+            case .leftMouseUp:
+                if self.isSelecting, let pos = self.locationToTerminalPosition(locationInView) {
+                    self.selectionEnd = pos
+                    self.isSelecting = false
+                    print("🖱️ 结束选择: start=(\(self.selectionStart?.row ?? 0),\(self.selectionStart?.col ?? 0)) end=(\(pos.row),\(pos.col))")
+                }
+                
+            default:
+                break
+            }
+            
+            // 仍然将事件传递给 TerminalView 以保持正常功能
+            return event
         }
         
-        print("📋 选中范围: row[\(startRow):\(endRow)] col[\(startCol):\(endCol)]")
-        
-        // 提取文本
-        guard let term = self.terminal else {
+        print("✅ [SelectableTerminalView] 鼠标追踪已设置")
+    }
+    
+    deinit {
+        if let monitor = mouseMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+    }
+    
+    // 将屏幕坐标转换为终端坐标
+    private func locationToTerminalPosition(_ location: NSPoint) -> Position? {
+        guard let terminal = terminalView.terminal else {
             print("⚠️ terminal 为 nil")
-            return
+            return nil
         }
+        
+        let font = terminalView.font
+        let charWidth = font.maximumAdvancement.width
+        let charHeight = font.boundingRectForFont.height
+        
+        print("🔍 字符尺寸: width=\(charWidth), height=\(charHeight)")
+        print("🔍 鼠标位置: x=\(location.x), y=\(location.y)")
+        
+        let col = Int(location.x / charWidth)
+        let row = Int((bounds.height - location.y) / charHeight)
+        
+        print("🔍 计算坐标: col=\(col), row=\(row)")
+        print("🔍 终端尺寸: cols=\(terminal.cols), rows=\(terminal.rows)")
+        
+        // 确保坐标在有效范围内
+        let validCol = max(0, min(col, terminal.cols - 1))
+        let validRow = max(0, min(row, terminal.rows - 1))
+        
+        print("🔍 有效坐标: col=\(validCol), row=\(validRow)")
+        
+        return Position(row: validRow, col: validCol)
+    }
+    
+    // 获取选中的文本
+    func getSelectedText() -> String? {
+        guard let start = selectionStart,
+              let end = selectionEnd,
+              let terminal = terminalView.terminal else {
+            print("⚠️ 没有选择或 terminal 为 nil")
+            return nil
+        }
+        
+        // 确保 start 在 end 之前
+        let (actualStart, actualEnd) = start.row < end.row || (start.row == end.row && start.col <= end.col)
+            ? (start, end)
+            : (end, start)
+        
+        print("📋 提取选中文本: start=(\(actualStart.row),\(actualStart.col)) end=(\(actualEnd.row),\(actualEnd.col))")
         
         var selectedText = ""
         
-        for row in startRow...endRow {
-            let lineStart = (row == startRow) ? startCol : 0
-            let lineEnd = (row == endRow) ? endCol : term.cols
+        for row in actualStart.row...actualEnd.row {
+            let lineStart = (row == actualStart.row) ? actualStart.col : 0
+            let lineEnd = (row == actualEnd.row) ? actualEnd.col : terminal.cols - 1
             
-            for col in lineStart..<lineEnd {
-                if let charData = term.getCharData(col: col, row: row) {
-                    let character = charData.getCharacter()
-                    selectedText.append(character)
+            for col in lineStart...lineEnd {
+                if let charData = terminal.getCharData(col: col, row: row) {
+                    selectedText.append(charData.getCharacter())
                 }
             }
             
-            if row < endRow {
+            if row < actualEnd.row {
                 selectedText.append("\n")
             }
         }
         
-        // 去除尾部空格
-        selectedText = selectedText.trimmingCharacters(in: .whitespaces)
+        let trimmed = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        print("📋 提取到文本: '\(trimmed.prefix(100))...'")
         
-        if !selectedText.isEmpty {
-            print("📋 提取到文本: \(selectedText.prefix(100))...")
-            
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.setString(selectedText, forType: .string)
-            
-            print("✅ 已复制到剪贴板")
-            NSSound.beep()
-        } else {
-            print("⚠️ 提取的文本为空")
-        }
+        return trimmed.isEmpty ? nil : trimmed
     }
     
-    // ⭐️ 处理粘贴
-    private func handlePaste() {
-        print("📋 handlePaste 被调用")
-        
-        let pasteboard = NSPasteboard.general
-        guard let text = pasteboard.string(forType: .string) else {
-            print("⚠️ 剪贴板中没有文本")
-            return
-        }
-        
-        print("📋 粘贴文本: \(text.prefix(50))...")
-        
-        if let data = text.data(using: .utf8) {
-            let bytes = [UInt8](data)
-            send(data: bytes[...])
-            print("✅ 已发送到终端")
-        }
+    // 清除选择
+    func clearSelection() {
+        selectionStart = nil
+        selectionEnd = nil
+        isSelecting = false
     }
 }
 
@@ -217,50 +264,67 @@ class CustomTerminalView: TerminalView {
 struct SwiftTermViewWrapper: NSViewRepresentable {
     @ObservedObject var session: SwiftTermSSHManager
     
-    func makeNSView(context: Context) -> CustomTerminalView {
-        let terminalView = CustomTerminalView()
+    func makeNSView(context: Context) -> NSView {
+        let terminalView = TerminalView()
         
         // ⭐️ 基本配置
-        terminalView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        terminalView.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
         terminalView.caretColor = NSColor.white
         terminalView.selectedTextBackgroundColor = NSColor(red: 0.3, green: 0.5, blue: 0.8, alpha: 0.5)
         terminalView.nativeBackgroundColor = NSColor.black
         terminalView.nativeForegroundColor = NSColor.white
         
-        // ⭐️ 关键：禁用鼠标报告，启用本地选择
+        // ⭐️ 关键配置
         terminalView.allowMouseReporting = false
-        
-        print("✅ [Terminal] allowMouseReporting = \(terminalView.allowMouseReporting)")
+        terminalView.optionAsMetaKey = true
         
         // 设置 delegate
         terminalView.terminalDelegate = context.coordinator
         
+        // ⭐️ 使用自定义包装器来追踪选择
+        let selectableView = SelectableTerminalView(terminalView: terminalView)
+        selectableView.coordinator = context.coordinator
+        
         // 保存引用
+        context.coordinator.selectableView = selectableView
         context.coordinator.terminalView = terminalView
         context.coordinator.sshSession = session
         
+        // 设置容器
+        let containerView = TerminalContainerView()
+        containerView.coordinator = context.coordinator
+        containerView.addSubview(selectableView)
+        
+        selectableView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            selectableView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            selectableView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+            selectableView.topAnchor.constraint(equalTo: containerView.topAnchor),
+            selectableView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor)
+        ])
+        
         // 设置数据接收闭包
-        let coordinator = context.coordinator
-        session.onDataReceived = { [weak coordinator] data in
-            coordinator?.feedData(data)
+        session.onDataReceived = { [weak terminalView] data in
+            guard let terminalView = terminalView else { return }
+            let bytes = [UInt8](data)
+            DispatchQueue.main.async {
+                terminalView.feed(byteArray: bytes[...])
+            }
         }
         
         print("✅ [Wrapper] SwiftTerm 视图已创建")
         
-        // 确保视图可以成为第一响应者
-        DispatchQueue.main.async {
-            terminalView.window?.makeFirstResponder(terminalView)
-            print("✅ [Wrapper] 设置为第一响应者")
-        }
-        
-        return terminalView
+        return containerView
     }
     
-    func updateNSView(_ terminalView: CustomTerminalView, context: Context) {
-        // 确保视图保持为第一响应者
-        if terminalView.window?.firstResponder != terminalView {
-            DispatchQueue.main.async {
-                terminalView.window?.makeFirstResponder(terminalView)
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard let containerView = nsView as? TerminalContainerView,
+              let selectableView = context.coordinator.selectableView else { return }
+        
+        // 确保视图可以接收键盘事件
+        DispatchQueue.main.async {
+            if selectableView.terminalView.window?.firstResponder != selectableView.terminalView {
+                selectableView.terminalView.window?.makeFirstResponder(selectableView.terminalView)
             }
         }
     }
@@ -271,7 +335,8 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
     
     // MARK: - Coordinator
     class Coordinator: NSObject, TerminalViewDelegate {
-        weak var terminalView: CustomTerminalView?
+        weak var selectableView: SelectableTerminalView?
+        weak var terminalView: TerminalView?
         weak var sshSession: SwiftTermSSHManager?
         
         // MARK: - TerminalViewDelegate
@@ -289,7 +354,11 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
         }
         
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            print("📐 终端尺寸: \(newCols)x\(newRows)")
+            print("📐 终端尺寸变化: \(newCols)x\(newRows)")
+            
+            Task { @MainActor in
+                self.sshSession?.updateTerminalSize(cols: newCols, rows: newRows)
+            }
         }
         
         func setTerminalIconTitle(source: TerminalView, title: String) {
@@ -301,21 +370,15 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
             }
         }
         
-        // ⭐️ SwiftTerm 的 clipboardCopy 回调
         func clipboardCopy(source: TerminalView, content: Data) {
-            print("📋 [clipboardCopy] 被调用！数据大小: \(content.count) 字节")
+            print("📋 [clipboardCopy] 被 SwiftTerm 调用，数据大小: \(content.count)")
             
-            if let text = String(data: content, encoding: .utf8) ??
-                          String(data: content, encoding: .ascii) ??
-                          String(data: content, encoding: .isoLatin1) {
-                
-                print("📋 [clipboardCopy] 文本: \(text.prefix(100))...")
-                
+            if let text = String(data: content, encoding: .utf8) {
                 DispatchQueue.main.async {
                     let pasteboard = NSPasteboard.general
                     pasteboard.clearContents()
                     pasteboard.setString(text, forType: .string)
-                    print("✅ [clipboardCopy] 已复制到剪贴板")
+                    print("✅ [clipboardCopy] 已复制到剪贴板: \(text.prefix(50))...")
                     NSSound.beep()
                 }
             }
@@ -328,16 +391,106 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
             NSSound.beep()
         }
         
-        // MARK: - 数据接收
-        func feedData(_ data: Data) {
+        // MARK: - 复制粘贴处理
+        
+        func handleCopy() {
+            print("📋 开始处理复制...")
+            
+            // ⭐️ 使用我们自己追踪的选择
+            if let text = selectableView?.getSelectedText() {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(text, forType: .string)
+                print("✅ 复制成功: \(text.prefix(50))...")
+                NSSound.beep()
+                return
+            }
+            
+            // 备用方案：尝试 SwiftTerm 的内置复制
+            if let terminalView = terminalView,
+               terminalView.responds(to: #selector(NSText.copy(_:))) {
+                print("📋 尝试使用 SwiftTerm 内置复制...")
+                terminalView.perform(#selector(NSText.copy(_:)), with: nil)
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    let pasteboard = NSPasteboard.general
+                    if let text = pasteboard.string(forType: .string), !text.isEmpty {
+                        print("✅ SwiftTerm 内置复制成功: \(text.prefix(50))...")
+                        NSSound.beep()
+                    } else {
+                        print("❌ 复制失败：没有选中内容")
+                    }
+                }
+                return
+            }
+            
+            print("❌ 复制失败：没有找到可用的方法")
+        }
+        
+        func handlePaste() {
             guard let terminalView = terminalView else { return }
             
-            let buffer = Array(data)
-            let arraySlice = buffer[...]
-            
-            DispatchQueue.main.async {
-                terminalView.feed(byteArray: arraySlice)
+            let pasteboard = NSPasteboard.general
+            guard let text = pasteboard.string(forType: .string) else {
+                print("⚠️ 剪贴板中没有文本")
+                return
             }
+            
+            print("📋 粘贴文本: \(text.prefix(50))...")
+            
+            if let data = text.data(using: .utf8) {
+                let bytes = [UInt8](data)
+                terminalView.send(data: bytes[...])
+            }
+        }
+    }
+}
+
+// MARK: - 容器视图
+class TerminalContainerView: NSView {
+    weak var coordinator: SwiftTermViewWrapper.Coordinator?
+    
+    private var eventMonitor: Any?
+    
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupKeyHandling()
+    }
+    
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupKeyHandling()
+    }
+    
+    private func setupKeyHandling() {
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self else { return event }
+            
+            // Cmd+C - 复制
+            if event.modifierFlags.contains(.command) &&
+               event.charactersIgnoringModifiers == "c" {
+                print("⌨️ 检测到 Cmd+C")
+                self.coordinator?.handleCopy()
+                return nil
+            }
+            
+            // Cmd+V - 粘贴
+            if event.modifierFlags.contains(.command) &&
+               event.charactersIgnoringModifiers == "v" {
+                print("⌨️ 检测到 Cmd+V")
+                self.coordinator?.handlePaste()
+                return nil
+            }
+            
+            return event
+        }
+        
+        print("✅ [Container] 键盘监听已设置")
+    }
+    
+    deinit {
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
         }
     }
 }

@@ -17,6 +17,7 @@ class SwiftTermSSHManager: ObservableObject {
     private var keepAliveTimer: Timer?
     
     var connection: SSHConnection?
+    var terminalSize: (cols: Int, rows: Int) = (80, 24)
     
     // 使用闭包而不是协议，避免循环引用
     var onDataReceived: ((Data) -> Void)?
@@ -53,9 +54,20 @@ class SwiftTermSSHManager: ObservableObject {
                     if isCommandAvailable("sshpass") {
                         print("   使用 sshpass")
                         process.executableURL = URL(fileURLWithPath: "/usr/bin/sshpass")
-                        process.arguments = ["-p", password, "ssh", "-p", "\(connection.port)",
-                                           "-o", "StrictHostKeyChecking=no", "-t",
-                                           "\(connection.username)@\(connection.host)"]
+                        
+                        // ⭐️ 关键修复：正确设置 PTY 和终端环境
+                        var args = ["-p", password, "ssh"]
+                        args.append(contentsOf: [
+                            "-p", "\(connection.port)",
+                            "-o", "StrictHostKeyChecking=no",
+                            "-o", "ServerAliveInterval=60",
+                            "-o", "ServerAliveCountMax=10",
+                            "-o", "TCPKeepAlive=yes",
+                            "-t",  // 强制分配 PTY
+                            "\(connection.username)@\(connection.host)"
+                        ])
+                        
+                        process.arguments = args
                     } else {
                         print("   sshpass 不可用，使用 expect 脚本")
                         let expectScript = createExpectScriptFile(connection: connection, password: password)
@@ -66,25 +78,23 @@ class SwiftTermSSHManager: ObservableObject {
                         }
                         
                         process.executableURL = URL(fileURLWithPath: "/usr/bin/expect")
-                        process.arguments = [expectScript]
+                        process.arguments = ["-f", expectScript]
                     }
                 } else {
                     throw NSError(domain: "SSHSession", code: -2,
                                 userInfo: [NSLocalizedDescriptionKey: "密码为空"])
                 }
             } else {
+                // 密钥认证
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
                 var args = [
+                    "-p", "\(connection.port)",
                     "-o", "StrictHostKeyChecking=no",
-                    "-t",  // 强制分配 PTY
-                    "-o", "ServerAliveInterval=60",      // 每 60 秒发送 keepalive
-                    "-o", "ServerAliveCountMax=10",      // 最多 10 次无响应
-                    "-o", "TCPKeepAlive=yes"             // 启用 TCP keepalive
+                    "-o", "ServerAliveInterval=60",
+                    "-o", "ServerAliveCountMax=10",
+                    "-o", "TCPKeepAlive=yes",
+                    "-t"  // 强制分配 PTY
                 ]
-                
-                if connection.port != 22 {
-                    args.append(contentsOf: ["-p", "\(connection.port)"])
-                }
                 
                 if let keyPath = connection.privateKeyPath {
                     args.append(contentsOf: ["-i", keyPath])
@@ -98,17 +108,20 @@ class SwiftTermSSHManager: ObservableObject {
             process.standardOutput = outputPipe
             process.standardError = errorPipe
             
+            // ⭐️ 关键修复：设置正确的环境变量
             var env = ProcessInfo.processInfo.environment
             env["TERM"] = "xterm-256color"
             env["LANG"] = "en_US.UTF-8"
             env["LC_ALL"] = "en_US.UTF-8"
+            env["COLUMNS"] = "\(terminalSize.cols)"
+            env["LINES"] = "\(terminalSize.rows)"
             process.environment = env
             
             // 设置输出处理
             setupOutputHandler(outputPipe.fileHandleForReading, isError: false)
             setupOutputHandler(errorPipe.fileHandleForReading, isError: true)
             
-            // 先保存引用
+            // 保存引用
             self.process = process
             self.inputPipe = inputPipe
             self.outputPipe = outputPipe
@@ -117,35 +130,31 @@ class SwiftTermSSHManager: ObservableObject {
             try process.run()
             
             print("✅ SSH 进程已启动，PID: \(process.processIdentifier)")
-            if connection.authMethod == .password {
-                print("   使用密码认证")
-            } else {
-                print("   使用密钥认证")
-            }
             
             await MainActor.run {
                 self.isConnecting = false
                 self.isConnected = true
-                self.startKeepAlive()  // 启动保活定时器
+                self.startKeepAlive()
+                
+                // ⭐️ 连接成功后发送终端尺寸设置命令
+                self.sendTerminalSizeUpdate()
             }
             
             process.terminationHandler = { [weak self] proc in
                 print("⚠️ SSH 进程已退出，状态: \(proc.terminationStatus)")
                 
-                // 清理 readability handler
                 outputPipe.fileHandleForReading.readabilityHandler = nil
                 errorPipe.fileHandleForReading.readabilityHandler = nil
                 
                 Task { @MainActor [weak self] in
                     guard let self = self else { return }
-                    self.stopKeepAlive()  // 停止保活定时器
+                    self.stopKeepAlive()
                     self.isConnected = false
                     
                     if proc.terminationStatus != 0 {
                         self.error = "连接已断开（退出码: \(proc.terminationStatus)）"
                     }
                     
-                    // 清理进程引用
                     self.process = nil
                     self.inputPipe = nil
                     self.outputPipe = nil
@@ -168,15 +177,6 @@ class SwiftTermSSHManager: ObservableObject {
             let data = handle.availableData
             guard !data.isEmpty else { return }
             
-            // 打印调试信息
-            if let text = String(data: data, encoding: .utf8) {
-                let prefix = isError ? "🔴 [Error]" : "🟢 [Output]"
-                print("\(prefix) 收到 \(data.count) 字节: \(text.prefix(100))")
-            } else {
-                let prefix = isError ? "🔴 [Error]" : "🟢 [Output]"
-                print("\(prefix) 收到 \(data.count) 字节 (非 UTF-8)")
-            }
-            
             Task { @MainActor [weak self] in
                 self?.onDataReceived?(data)
             }
@@ -196,6 +196,24 @@ class SwiftTermSSHManager: ObservableObject {
         }
     }
     
+    // ⭐️ 新增：更新终端尺寸
+    func updateTerminalSize(cols: Int, rows: Int) {
+        terminalSize = (cols, rows)
+        
+        if isConnected {
+            sendTerminalSizeUpdate()
+        }
+    }
+    
+    // ⭐️ 发送终端尺寸更新（通过 stty）
+    private func sendTerminalSizeUpdate() {
+        // 通过发送 stty 命令来更新远程终端尺寸
+        let command = "stty cols \(terminalSize.cols) rows \(terminalSize.rows)\r"
+        if let data = command.data(using: .utf8) {
+            send(data: data)
+        }
+    }
+    
     // MARK: - 断开连接
     func disconnect() {
         stopKeepAlive()
@@ -212,19 +230,17 @@ class SwiftTermSSHManager: ObservableObject {
     
     // MARK: - 保活定时器
     private func startKeepAlive() {
-        // 每 3 分钟（180 秒）发送一个空字节保持连接
         keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 180, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self = self, self.isConnected else { return }
                 
                 print("💓 发送保活信号")
-                // 发送一个空字节（不会显示在终端）
-                let keepAliveData = Data([0])
+                // 发送一个空格加退格，不会影响终端显示
+                let keepAliveData = Data([32, 8]) // 空格 + 退格
                 self.send(data: keepAliveData)
             }
         }
         
-        // 确保 timer 在主运行循环中
         if let timer = keepAliveTimer {
             RunLoop.main.add(timer, forMode: .common)
         }
@@ -251,18 +267,22 @@ class SwiftTermSSHManager: ObservableObject {
         let random = UUID().uuidString.prefix(8)
         let scriptFile = tempDir.appendingPathComponent("ssh_\(timestamp)_\(random).exp")
         
+        // ⭐️ 修复：密码转义
         let escapedPwd = password
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "$", with: "\\$")
-            .replacingOccurrences(of: "[", with: "\\[")
-            .replacingOccurrences(of: "]", with: "\\]")
+            .replacingOccurrences(of: "`", with: "\\`")
         
-        let sshCommand = "ssh -p \(connection.port) -o StrictHostKeyChecking=no -t \(connection.username)@\(connection.host)"
+        let sshCommand = "ssh -p \(connection.port) -o StrictHostKeyChecking=no -o ServerAliveInterval=60 -t \(connection.username)@\(connection.host)"
         
         let expectScript = """
 #!/usr/bin/expect -f
-set timeout -1
+set timeout 30
+
+# 设置环境变量
+set env(TERM) "xterm-256color"
+set env(LANG) "en_US.UTF-8"
 
 spawn \(sshCommand)
 
@@ -271,42 +291,33 @@ expect {
         send "yes\\r"
         exp_continue
     }
-    "assword:" {
+    -re "(?i)password:" {
         send "\(escapedPwd)\\r"
         exp_continue
     }
     -re "(?i)permission denied" {
-        send_user "Auth failed\\r"
+        send_user "\\nAuthentication failed\\n"
         exit 1
     }
-    -re "\\\\$|#|>" {
+    -re "\\\\$|#|%|>" {
+        # 登录成功
     }
     timeout {
-        send_user "Timeout\\r"
+        send_user "\\nConnection timeout\\n"
+        exit 1
+    }
+    eof {
+        send_user "\\nConnection closed\\n"
         exit 1
     }
 }
 
-interact {
-    timeout -1
-}
+# 进入交互模式
+interact
 """
         
         do {
-            // 确保使用 ASCII 编码写入
-            guard let scriptData = expectScript.data(using: .ascii) else {
-                print("❌ 无法将脚本转换为 ASCII")
-                return ""
-            }
-            
-            try scriptData.write(to: scriptFile)
-            
-            print("📝 Expect 脚本已创建: \(scriptFile.path)")
-            print("   SSH 命令: \(sshCommand)")
-            print("   脚本内容前 200 字符:")
-            if let preview = String(data: scriptData.prefix(200), encoding: .ascii) {
-                print("   \(preview.replacingOccurrences(of: "\n", with: "\\n"))")
-            }
+            try expectScript.write(to: scriptFile, atomically: true, encoding: .utf8)
             
             let chmodProcess = Process()
             chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
@@ -314,8 +325,9 @@ interact {
             try? chmodProcess.run()
             chmodProcess.waitUntilExit()
             
-            print("   权限已设置")
+            print("✅ Expect 脚本已创建: \(scriptFile.path)")
             
+            // 5分钟后删除临时文件
             DispatchQueue.main.asyncAfter(deadline: .now() + 300) {
                 try? FileManager.default.removeItem(at: scriptFile)
             }
@@ -328,16 +340,9 @@ interact {
     }
     
     deinit {
-//        Task { @MainActor in
-//            self.stopKeepAlive()
-//        }
-//        process?.terminate()
-        // 直接停止定时器，不需要 Task
         keepAliveTimer?.invalidate()
         keepAliveTimer = nil
-        
         process?.terminate()
-        
         print("💓 SwiftTermSSHManager 已释放")
     }
     
