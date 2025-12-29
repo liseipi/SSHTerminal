@@ -63,6 +63,7 @@ class SwiftTermSSHManager: ObservableObject {
                             "-o", "ServerAliveInterval=60",
                             "-o", "ServerAliveCountMax=10",
                             "-o", "TCPKeepAlive=yes",
+                            "-o", "ConnectTimeout=30",
                             "-t",  // 强制分配 PTY
                             "\(connection.username)@\(connection.host)"
                         ])
@@ -93,6 +94,7 @@ class SwiftTermSSHManager: ObservableObject {
                     "-o", "ServerAliveInterval=60",
                     "-o", "ServerAliveCountMax=10",
                     "-o", "TCPKeepAlive=yes",
+                    "-o", "ConnectTimeout=30",
                     "-t"  // 强制分配 PTY
                 ]
                 
@@ -274,40 +276,60 @@ class SwiftTermSSHManager: ObservableObject {
             .replacingOccurrences(of: "$", with: "\\$")
             .replacingOccurrences(of: "`", with: "\\`")
         
-        let sshCommand = "ssh -p \(connection.port) -o StrictHostKeyChecking=no -o ServerAliveInterval=60 -t \(connection.username)@\(connection.host)"
+        let sshCommand = "ssh -p \(connection.port) -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=60 -t \(connection.username)@\(connection.host)"
         
+        // ⭐️ 优化后的 expect 脚本
         let expectScript = """
 #!/usr/bin/expect -f
-set timeout 30
+set timeout 60
+log_user 1
 
 # 设置环境变量
 set env(TERM) "xterm-256color"
 set env(LANG) "en_US.UTF-8"
 
+# 启动 SSH 连接
+puts "🔗 Connecting to \(connection.host):\(connection.port)...\\r"
 spawn \(sshCommand)
 
+# 等待密码提示或其他交互
 expect {
-    -re "(?i)are you sure" {
+    -re "(?i)(are you sure|fingerprint)" {
+        puts "🔑 接受主机密钥..."
         send "yes\\r"
         exp_continue
     }
-    -re "(?i)password:" {
+    -re "(?i)(password:|password for)" {
+        puts "🔐 输入密码..."
         send "\(escapedPwd)\\r"
         exp_continue
     }
-    -re "(?i)permission denied" {
-        send_user "\\nAuthentication failed\\n"
+    -re "(?i)(permission denied|access denied)" {
+        puts "\\n❌ 认证失败：密码错误或权限不足"
         exit 1
     }
-    -re "\\\\$|#|%|>" {
-        # 登录成功
+    -re ".*(@|\\\\$|#|%|>).*" {
+        # 登录成功，看到提示符
+        puts "\\n✅ 登录成功"
+    }
+    -re "Connection refused" {
+        puts "\\n❌ 连接被拒绝：请检查主机地址和端口"
+        exit 1
+    }
+    -re "No route to host" {
+        puts "\\n❌ 无法访问主机：请检查网络连接"
+        exit 1
+    }
+    -re "Name or service not known" {
+        puts "\\n❌ 主机名解析失败：请检查主机地址"
+        exit 1
     }
     timeout {
-        send_user "\\nConnection timeout\\n"
+        puts "\\n❌ 连接超时：请检查主机地址、端口和网络连接"
         exit 1
     }
     eof {
-        send_user "\\nConnection closed\\n"
+        puts "\\n❌ 连接意外关闭"
         exit 1
     }
 }
