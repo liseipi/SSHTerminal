@@ -222,88 +222,88 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
                 return
             }
             
-            // ⭐️ 方法 1: 使用 SwiftTerm 的 getSelection
-            if let selection = terminalView.getSelection() {
-                print("📋 使用 getSelection() 获取选中内容")
-                let pasteboard = NSPasteboard.general
-                pasteboard.clearContents()
-                pasteboard.setString(selection, forType: .string)
-                print("✅ 复制成功: \(selection.prefix(100))...")
-                NSSound.beep()
+            // ⭐️ 方法 1: 深度反射提取 selection 对象
+            if let text = deepExtractSelection(from: terminalView), !text.isEmpty {
+                print("✅ [深度提取] 成功，长度: \(text.count)")
+                copyToClipboard(text)
                 return
             }
             
-            // ⭐️ 方法 2: 尝试调用 SwiftTerm 的内置 copy
-            if terminalView.responds(to: #selector(NSText.copy(_:))) {
-                print("📋 使用 SwiftTerm 内置 copy(_:)")
-                terminalView.perform(#selector(NSText.copy(_:)), with: nil)
-                
-                // 等待一下，检查剪贴板
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    let pasteboard = NSPasteboard.general
-                    if let text = pasteboard.string(forType: .string), !text.isEmpty {
-                        print("✅ 内置复制成功: \(text.prefix(100))...")
-                        NSSound.beep()
-                    } else {
-                        print("⚠️ 内置复制未产生结果")
-                    }
-                }
+            // ⭐️ 方法 2: 使用 SwiftTerm 的 getSelection
+            if let selection = terminalView.getSelection(), !selection.isEmpty {
+                print("✅ [getSelection] 成功，长度: \(selection.count)")
+                copyToClipboard(selection)
                 return
             }
             
-            // ⭐️ 方法 3: 手动从终端缓冲区读取选中的内容
-            print("📋 尝试手动读取选中内容...")
-            if let selectedText = extractSelectedText(from: terminalView) {
-                let pasteboard = NSPasteboard.general
-                pasteboard.clearContents()
-                pasteboard.setString(selectedText, forType: .string)
-                print("✅ 手动提取成功: \(selectedText.prefix(100))...")
-                NSSound.beep()
+            // ⭐️ 方法 3: 尝试从 Terminal 对象直接读取
+            if let text = extractFromTerminalBuffer(terminalView), !text.isEmpty {
+                print("✅ [Terminal缓冲区] 成功，长度: \(text.count)")
+                copyToClipboard(text)
                 return
             }
             
             print("❌ 所有复制方法都失败了")
+            print("💡 提示：请确保用鼠标选中了文本")
+            
+            // 发出错误提示音
+            DispatchQueue.main.async {
+                NSSound(named: NSSound.Name("Basso"))?.play()
+            }
         }
         
-        // ⭐️ 手动提取选中的文本
-        private func extractSelectedText(from terminalView: TerminalView) -> String? {
-            guard let terminal = terminalView.terminal else {
-                print("⚠️ terminal 为 nil")
-                return nil
-            }
+        // ⭐️ 深度反射提取 selection
+        private func deepExtractSelection(from terminalView: TerminalView) -> String? {
+            print("🔍 [深度提取] 开始...")
             
-            // 尝试访问 selection 属性
             let mirror = Mirror(reflecting: terminalView)
+            
             for child in mirror.children {
-                if child.label == "selection" || child.label == "_selection" {
-                    print("🔍 找到 selection 属性: \(child.value)")
+                guard let label = child.label else { continue }
+                
+                // 找到 selection 属性
+                if label == "selection" {
+                    print("  找到 selection 属性")
                     
-                    // 如果是 SelectionRange 类型，尝试提取
+                    // 检查 selection 的类型
                     let selectionMirror = Mirror(reflecting: child.value)
-                    var startCol = 0, startRow = 0, endCol = 0, endRow = 0
+                    print("  selection 类型: \(type(of: child.value))")
+                    print("  selection 子属性数量: \(selectionMirror.children.count)")
                     
-                    for prop in selectionMirror.children {
-                        print("  - \(prop.label ?? "?"): \(prop.value)")
+                    // 列出所有子属性
+                    for selChild in selectionMirror.children {
+                        let selLabel = selChild.label ?? "未知"
+                        print("    - \(selLabel): \(type(of: selChild.value))")
                         
-                        if prop.label == "start" {
-                            let startMirror = Mirror(reflecting: prop.value)
+                        // 尝试提取 start 和 end
+                        if selLabel == "start" {
+                            let startMirror = Mirror(reflecting: selChild.value)
                             for startProp in startMirror.children {
-                                if startProp.label == "col" { startCol = startProp.value as? Int ?? 0 }
-                                if startProp.label == "row" { startRow = startProp.value as? Int ?? 0 }
+                                print("      start.\(startProp.label ?? "?"): \(startProp.value)")
                             }
                         }
-                        if prop.label == "end" {
-                            let endMirror = Mirror(reflecting: prop.value)
+                        
+                        if selLabel == "end" {
+                            let endMirror = Mirror(reflecting: selChild.value)
                             for endProp in endMirror.children {
-                                if endProp.label == "col" { endCol = endProp.value as? Int ?? 0 }
-                                if endProp.label == "row" { endRow = endProp.value as? Int ?? 0 }
+                                print("      end.\(endProp.label ?? "?"): \(endProp.value)")
                             }
                         }
                     }
                     
-                    if startRow != endRow || startCol != endCol {
-                        print("📋 选区: (\(startRow),\(startCol)) -> (\(endRow),\(endCol))")
-                        return extractText(from: terminal, startRow: startRow, startCol: startCol, endRow: endRow, endCol: endCol)
+                    // 尝试提取选择范围
+                    if let range = extractSelectionRange(from: child.value) {
+                        print("  成功提取范围: \(range)")
+                        
+                        // 验证范围是否有效
+                        if range.startRow == range.endRow && range.startCol == range.endCol {
+                            print("  ⚠️ 选择范围为空（起点等于终点）")
+                            return nil
+                        }
+                        
+                        return extractTextFromRange(terminalView: terminalView, range: range)
+                    } else {
+                        print("  ⚠️ 无法提取选择范围")
                     }
                 }
             }
@@ -311,27 +311,212 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
             return nil
         }
         
-        private func extractText(from terminal: Terminal, startRow: Int, startCol: Int, endRow: Int, endCol: Int) -> String? {
+        // ⭐️ 从 Terminal 缓冲区直接提取
+        private func extractFromTerminalBuffer(_ terminalView: TerminalView) -> String? {
+            print("🔍 [Terminal缓冲区] 尝试直接读取...")
+            
+            guard let terminal = terminalView.terminal else {
+                print("  ⚠️ terminal 对象为 nil")
+                return nil
+            }
+            
+            // 尝试读取 terminal 的内部属性
+            let terminalMirror = Mirror(reflecting: terminal)
+            
+            for child in terminalMirror.children {
+                guard let label = child.label else { continue }
+                
+                if label.lowercased().contains("select") || label.lowercased().contains("buffer") {
+                    print("  找到属性: \(label)")
+                    
+                    // 如果是 selection，尝试提取
+                    if label.lowercased().contains("select") {
+                        if let range = extractSelectionRange(from: child.value) {
+                            print("  提取到选择范围")
+                            return extractTextFromRange(terminalView: terminalView, range: range)
+                        }
+                    }
+                }
+            }
+            
+            print("  ⚠️ 未找到有用的属性")
+            return nil
+        }
+        
+        // 提取选择范围（增强版）
+        private func extractSelectionRange(from value: Any) -> SelectionRange? {
+            let mirror = Mirror(reflecting: value)
+            
+            // 检查是否是 Optional
+            if mirror.displayStyle == .optional {
+                // 如果是 nil，直接返回
+                if mirror.children.count == 0 {
+                    print("    selection 为 nil")
+                    return nil
+                }
+                
+                // 提取 Optional 的值
+                if let firstChild = mirror.children.first {
+                    return extractSelectionRange(from: firstChild.value)
+                }
+            }
+            
+            var startCol: Int?
+            var startRow: Int?
+            var endCol: Int?
+            var endRow: Int?
+            
+            for child in mirror.children {
+                let label = child.label ?? ""
+                
+                if label == "start" || label.contains("start") {
+                    if let pos = extractPosition(from: child.value) {
+                        startCol = pos.col
+                        startRow = pos.row
+                        print("    提取到 start: (\(pos.row), \(pos.col))")
+                    }
+                }
+                
+                if label == "end" || label.contains("end") {
+                    if let pos = extractPosition(from: child.value) {
+                        endCol = pos.col
+                        endRow = pos.row
+                        print("    提取到 end: (\(pos.row), \(pos.col))")
+                    }
+                }
+                
+                // 有些实现可能用不同的字段名
+                if label == "startCol" { startCol = child.value as? Int }
+                if label == "startRow" { startRow = child.value as? Int }
+                if label == "endCol" { endCol = child.value as? Int }
+                if label == "endRow" { endRow = child.value as? Int }
+            }
+            
+            if let sc = startCol, let sr = startRow, let ec = endCol, let er = endRow {
+                return SelectionRange(
+                    startCol: sc,
+                    startRow: sr,
+                    endCol: ec,
+                    endRow: er
+                )
+            }
+            
+            return nil
+        }
+        
+        // 提取位置信息（增强版）
+        private func extractPosition(from value: Any) -> (col: Int, row: Int)? {
+            let mirror = Mirror(reflecting: value)
+            
+            // 检查是否是 Optional
+            if mirror.displayStyle == .optional {
+                if mirror.children.count == 0 {
+                    return nil
+                }
+                if let firstChild = mirror.children.first {
+                    return extractPosition(from: firstChild.value)
+                }
+            }
+            
+            var col: Int?
+            var row: Int?
+            
+            for child in mirror.children {
+                let label = child.label ?? ""
+                
+                if label == "col" || label == "column" || label == "x" {
+                    col = child.value as? Int
+                }
+                
+                if label == "row" || label == "line" || label == "y" {
+                    row = child.value as? Int
+                }
+            }
+            
+            if let c = col, let r = row {
+                return (c, r)
+            }
+            
+            return nil
+        }
+        
+        // 从范围提取文本（增强版）
+        private func extractTextFromRange(terminalView: TerminalView, range: SelectionRange) -> String? {
+            guard let terminal = terminalView.terminal else {
+                print("  ⚠️ terminal 为 nil")
+                return nil
+            }
+            
+            print("  从范围提取文本: (\(range.startRow),\(range.startCol)) -> (\(range.endRow),\(range.endCol))")
+            
             var text = ""
+            let startRow = min(range.startRow, range.endRow)
+            let endRow = max(range.startRow, range.endRow)
             
             for row in startRow...endRow {
-                let lineStart = (row == startRow) ? startCol : 0
-                let lineEnd = (row == endRow) ? endCol : terminal.cols - 1
+                let lineStart: Int
+                let lineEnd: Int
+                
+                if startRow == endRow {
+                    // 单行选择
+                    lineStart = min(range.startCol, range.endCol)
+                    lineEnd = max(range.startCol, range.endCol)
+                } else if row == startRow {
+                    // 起始行
+                    lineStart = range.startCol
+                    lineEnd = terminal.cols - 1
+                } else if row == endRow {
+                    // 结束行
+                    lineStart = 0
+                    lineEnd = range.endCol
+                } else {
+                    // 中间行
+                    lineStart = 0
+                    lineEnd = terminal.cols - 1
+                }
                 
                 var lineText = ""
                 for col in lineStart...lineEnd {
                     if let charData = terminal.getCharData(col: col, row: row) {
-                        lineText.append(charData.getCharacter())
+                        let char = charData.getCharacter()
+                        lineText.append(char)
                     }
                 }
                 
-                text += lineText.trimmingCharacters(in: .whitespaces)
+                // 保留行尾空格，但移除末尾的大量空格
+                let trimmed = lineText.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+                text += trimmed
+                
                 if row < endRow {
                     text += "\n"
                 }
             }
             
-            return text.isEmpty ? nil : text
+            let finalText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            print("  提取的文本长度: \(finalText.count)")
+            
+            return finalText.isEmpty ? nil : finalText
+        }
+        
+        // 复制到剪贴板
+        private func copyToClipboard(_ text: String) {
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            let success = pasteboard.setString(text, forType: .string)
+            
+            if success {
+                print("✅ 已复制到剪贴板，长度: \(text.count)")
+                print("   内容前100字符: '\(text.prefix(100))'")
+                
+                // 验证
+                if let verified = pasteboard.string(forType: .string) {
+                    print("✅ 剪贴板验证成功，长度: \(verified.count)")
+                }
+                
+                NSSound.beep()
+            } else {
+                print("❌ 复制到剪贴板失败")
+            }
         }
         
         func handlePaste() {
@@ -343,13 +528,25 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
                 return
             }
             
-            print("📋 粘贴文本: \(text.prefix(50))...")
+            print("📋 粘贴文本长度: \(text.count)")
             
             if let data = text.data(using: .utf8) {
                 let bytes = [UInt8](data)
                 terminalView.send(data: bytes[...])
             }
         }
+    }
+}
+
+// MARK: - 辅助结构
+private struct SelectionRange: CustomStringConvertible {
+    let startCol: Int
+    let startRow: Int
+    let endCol: Int
+    let endRow: Int
+    
+    var description: String {
+        "(\(startRow),\(startCol)) -> (\(endRow),\(endCol))"
     }
 }
 
