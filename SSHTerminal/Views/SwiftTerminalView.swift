@@ -93,8 +93,33 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let terminalView = TerminalView()
         
-        // ⭐️ 基本配置
-        terminalView.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+        // ⭐️ 使用支持中文的等宽字体
+        let font: NSFont
+        if let menlo = NSFont(name: "Menlo", size: 13) {  // 改为 13，更适合中文
+            font = menlo
+        } else if let sfMono = NSFont(name: "SF Mono", size: 13) {
+            font = sfMono
+        } else {
+            font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        }
+        
+        terminalView.font = font
+        
+        // 设置字体回退列表（确保中文渲染）
+        let fontDescriptor = font.fontDescriptor.addingAttributes([
+            .cascadeList: [
+                NSFontDescriptor(name: "PingFang SC", size: 13),  // 中文字体
+                NSFontDescriptor(name: "Hiragino Sans GB", size: 13),  // 备用中文字体
+            ]
+        ])
+        
+        if let enhancedFont = NSFont(descriptor: fontDescriptor, size: 13) {
+            terminalView.font = enhancedFont
+            print("🔤 已启用中文字体回退")
+        }
+        
+        print("🔤 使用字体: \(terminalView.font.fontName), 大小: \(terminalView.font.pointSize)")
+        
         terminalView.caretColor = NSColor.white
         terminalView.selectedTextBackgroundColor = NSColor(red: 0.3, green: 0.5, blue: 0.8, alpha: 0.5)
         terminalView.nativeBackgroundColor = NSColor.black
@@ -110,6 +135,12 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
         // 保存引用
         context.coordinator.terminalView = terminalView
         context.coordinator.sshSession = session
+        
+        // 定时刷新
+//        let refreshTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak terminalView] _ in
+//            terminalView?.setNeedsDisplay(terminalView?.bounds ?? .zero)
+//        }
+//        context.coordinator.refreshTimer = refreshTimer
         
         // 设置容器视图
         let containerView = TerminalContainerView()
@@ -159,6 +190,11 @@ struct SwiftTermViewWrapper: NSViewRepresentable {
     class Coordinator: NSObject, TerminalViewDelegate {
         weak var terminalView: TerminalView?
         weak var sshSession: SwiftTermSSHManager?
+        var refreshTimer: Timer?
+        
+        deinit {
+            refreshTimer?.invalidate()
+        }
         
         // MARK: - TerminalViewDelegate
         

@@ -113,8 +113,9 @@ class SwiftTermSSHManager: ObservableObject {
             // ⭐️ 关键修复：设置正确的环境变量
             var env = ProcessInfo.processInfo.environment
             env["TERM"] = "xterm-256color"
-            env["LANG"] = "en_US.UTF-8"
-            env["LC_ALL"] = "en_US.UTF-8"
+            env["LANG"] = "zh_CN.UTF-8"       // ✅ 改为中文
+            env["LC_ALL"] = "zh_CN.UTF-8"      // ✅ 改为中文
+            env["LC_CTYPE"] = "zh_CN.UTF-8"    // ✅ 添加此项
             env["COLUMNS"] = "\(terminalSize.cols)"
             env["LINES"] = "\(terminalSize.rows)"
             process.environment = env
@@ -284,9 +285,11 @@ class SwiftTermSSHManager: ObservableObject {
 set timeout 60
 log_user 1
 
-# 设置环境变量
-set env(TERM) "xterm-256color"
-set env(LANG) "en_US.UTF-8"
+# ✅ 设置支持中文的环境变量
+set env(TERM) "xterm"
+set env(LANG) "zh_CN.UTF-8"
+set env(LC_ALL) "zh_CN.UTF-8"
+set env(LC_CTYPE) "zh_CN.UTF-8"
 
 # 启动 SSH 连接
 puts "🔗 Connecting to \(connection.host):\(connection.port)...\\r"
