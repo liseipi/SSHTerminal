@@ -6,6 +6,11 @@
 ![Swift](https://img.shields.io/badge/Swift-5.5+-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
+<p align="center">
+  <img src="SSHTerminal/Assets.xcassets/main.png" width="550" alt="main">
+  <img src="SSHTerminal/Assets.xcassets/add.png" width="250" alt="main">
+</p>
+
 ## ✨ 特性
 
 ### 🚀 核心功能
