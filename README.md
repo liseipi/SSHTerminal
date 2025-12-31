@@ -1,5 +1,9 @@
 # SSH Terminal Manager
 
+<p align="center">
+  <img src="SSHTerminal/Assets.xcassets/icon.png" width="128" height="128" alt="SystemProxy Logo">
+</p>
+
 一个基于 SwiftUI 和 SwiftTerm 构建的现代化 macOS SSH 连接管理工具，支持多标签页、内置终端和智能连接管理。
 
 ![macOS](https://img.shields.io/badge/macOS-11.0+-blue.svg)
