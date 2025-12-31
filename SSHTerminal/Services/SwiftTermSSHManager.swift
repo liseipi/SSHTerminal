@@ -55,7 +55,6 @@ class SwiftTermSSHManager: ObservableObject {
                         print("   使用 sshpass")
                         process.executableURL = URL(fileURLWithPath: "/usr/bin/sshpass")
                         
-                        // ⭐️ 关键修复：正确设置 PTY 和终端环境
                         var args = ["-p", password, "ssh"]
                         args.append(contentsOf: [
                             "-p", "\(connection.port)",
@@ -64,22 +63,25 @@ class SwiftTermSSHManager: ObservableObject {
                             "-o", "ServerAliveCountMax=10",
                             "-o", "TCPKeepAlive=yes",
                             "-o", "ConnectTimeout=30",
-                            "-t",  // 强制分配 PTY
+                            "-t",
                             "\(connection.username)@\(connection.host)"
                         ])
                         
                         process.arguments = args
                     } else {
                         print("   sshpass 不可用，使用 expect 脚本")
-                        let expectScript = createExpectScriptFile(connection: connection, password: password)
                         
-                        if expectScript.isEmpty {
+                        // ⭐️ 修改：创建脚本并将密码作为参数传递
+                        let scriptPath = createExpectScriptFile(connection: connection)
+                        
+                        if scriptPath.isEmpty {
                             throw NSError(domain: "SSHSession", code: -1,
                                         userInfo: [NSLocalizedDescriptionKey: "无法创建 expect 脚本"])
                         }
                         
                         process.executableURL = URL(fileURLWithPath: "/usr/bin/expect")
-                        process.arguments = ["-f", expectScript]
+                        // ⭐️ 关键：将密码作为参数传递
+                        process.arguments = [scriptPath, password]
                     }
                 } else {
                     throw NSError(domain: "SSHSession", code: -2,
@@ -258,7 +260,7 @@ class SwiftTermSSHManager: ObservableObject {
     }
     
     // MARK: - 创建 expect 脚本
-    private func createExpectScriptFile(connection: SSHConnection, password: String) -> String {
+    private func createExpectScriptFile(connection: SSHConnection) -> String {
         let tempDir: URL
         if let realTempDir = getenv("TMPDIR") {
             tempDir = URL(fileURLWithPath: String(cString: realTempDir))
@@ -270,76 +272,75 @@ class SwiftTermSSHManager: ObservableObject {
         let random = UUID().uuidString.prefix(8)
         let scriptFile = tempDir.appendingPathComponent("ssh_\(timestamp)_\(random).exp")
         
-        // ⭐️ 修复：密码转义
-        let escapedPwd = password
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "$", with: "\\$")
-            .replacingOccurrences(of: "`", with: "\\`")
-        
         let sshCommand = "ssh -p \(connection.port) -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=60 -t \(connection.username)@\(connection.host)"
         
-        // ⭐️ 优化后的 expect 脚本
+        // ⭐️ expect 脚本：从命令行参数读取密码
         let expectScript = """
-#!/usr/bin/expect -f
-set timeout 60
-log_user 1
+    #!/usr/bin/expect -f
+    set timeout 60
+    log_user 1
 
-# ✅ 设置支持中文的环境变量
-set env(TERM) "xterm"
-set env(LANG) "zh_CN.UTF-8"
-set env(LC_ALL) "zh_CN.UTF-8"
-set env(LC_CTYPE) "zh_CN.UTF-8"
+    # 从命令行参数获取密码
+    if {[llength $argv] < 1} {
+        puts "错误：缺少密码参数"
+        exit 1
+    }
+    set password [lindex $argv 0]
 
-# 启动 SSH 连接
-puts "🔗 Connecting to \(connection.host):\(connection.port)...\\r"
-spawn \(sshCommand)
+    # 设置环境变量
+    set env(TERM) "xterm-256color"
+    set env(LANG) "zh_CN.UTF-8"
+    set env(LC_ALL) "zh_CN.UTF-8"
+    set env(LC_CTYPE) "zh_CN.UTF-8"
 
-# 等待密码提示或其他交互
-expect {
-    -re "(?i)(are you sure|fingerprint)" {
-        puts "🔑 接受主机密钥..."
-        send "yes\\r"
-        exp_continue
-    }
-    -re "(?i)(password:|password for)" {
-        puts "🔐 输入密码..."
-        send "\(escapedPwd)\\r"
-        exp_continue
-    }
-    -re "(?i)(permission denied|access denied)" {
-        puts "\\n❌ 认证失败：密码错误或权限不足"
-        exit 1
-    }
-    -re ".*(@|\\\\$|#|%|>).*" {
-        # 登录成功，看到提示符
-        puts "\\n✅ 登录成功"
-    }
-    -re "Connection refused" {
-        puts "\\n❌ 连接被拒绝：请检查主机地址和端口"
-        exit 1
-    }
-    -re "No route to host" {
-        puts "\\n❌ 无法访问主机：请检查网络连接"
-        exit 1
-    }
-    -re "Name or service not known" {
-        puts "\\n❌ 主机名解析失败：请检查主机地址"
-        exit 1
-    }
-    timeout {
-        puts "\\n❌ 连接超时：请检查主机地址、端口和网络连接"
-        exit 1
-    }
-    eof {
-        puts "\\n❌ 连接意外关闭"
-        exit 1
-    }
-}
+    # 启动 SSH 连接
+    puts "🔗 Connecting to \(connection.host):\(connection.port)..."
+    spawn \(sshCommand)
 
-# 进入交互模式
-interact
-"""
+    # 等待密码提示或其他交互
+    expect {
+        -re "(?i)(are you sure|fingerprint)" {
+            puts "🔑 接受主机密钥..."
+            send "yes\\r"
+            exp_continue
+        }
+        -re "(?i)(password:|password for)" {
+            puts "🔐 输入密码..."
+            send -- "$password\\r"
+            exp_continue
+        }
+        -re "(?i)(permission denied|access denied)" {
+            puts "\\n❌ 认证失败：密码错误或权限不足"
+            exit 1
+        }
+        -re ".*(@|\\\\$|#|%|>).*" {
+            puts "\\n✅ 登录成功"
+        }
+        -re "Connection refused" {
+            puts "\\n❌ 连接被拒绝"
+            exit 1
+        }
+        -re "No route to host" {
+            puts "\\n❌ 无法访问主机"
+            exit 1
+        }
+        -re "Name or service not known" {
+            puts "\\n❌ 主机名解析失败"
+            exit 1
+        }
+        timeout {
+            puts "\\n❌ 连接超时"
+            exit 1
+        }
+        eof {
+            puts "\\n❌ 连接意外关闭"
+            exit 1
+        }
+    }
+
+    # 进入交互模式
+    interact
+    """
         
         do {
             try expectScript.write(to: scriptFile, atomically: true, encoding: .utf8)
@@ -357,6 +358,7 @@ interact
                 try? FileManager.default.removeItem(at: scriptFile)
             }
             
+            // ⭐️ 返回脚本路径（不是完整命令）
             return scriptFile.path
         } catch {
             print("❌ 创建 expect 脚本失败: \(error)")
